@@ -1,8 +1,8 @@
-# GiftFlow Demo 实施计划与变更记录
+# GiftFlow 原型实施计划与变更记录
 
 ## 1. 文档目的
 
-本文档用于记录 GiftFlow 福利领取系统 Demo 的实现步骤、关键检查点、验证方式，以及 Codex 在开发过程中新增和修改的文件。
+本文档用于记录 GiftFlow 福利领取系统原型的实现步骤、关键检查点、验证方式，以及 Codex 在开发过程中新增和修改的文件。
 
 对应 PRD：[giftsys_prd.md](./giftsys_prd.md)
 
@@ -11,7 +11,7 @@
 - 优先完成可演示闭环：活动配置 -> 员工预约 -> 凭证生成 -> 管理员核销 -> 库存变化 -> 数据统计。
 - 先实现稳定的数据模型和业务规则，再实现 Streamlit 页面。
 - 自然语言配置只生成配置草稿，必须经过人工确认后才发布活动。
-- Demo 版本使用模拟登录、SQLite 和本地数据，不接入企业微信、短信、真实扫码枪或生产级权限。
+- 原型版本使用模拟登录、SQLite 和本地数据，不接入企业微信、真实短信网关、真实扫码枪或生产级权限。
 - 每个阶段完成后都保留可检查的页面、数据或命令结果，避免最后才发现主链路断开。
 
 ## 3. 推荐项目结构
@@ -37,7 +37,7 @@ giftsys/
 │   └── codegen.py                 # 凭证码、二维码等工具
 ├── data/
 │   └── giftflow.db                # 本地 SQLite 数据库，运行后生成
-├── giftsys_prd.md                 # Demo PRD
+├── giftsys_prd.md                 # 原型 PRD
 └── giftsys_implementation_log.md  # 本文档
 ```
 
@@ -194,7 +194,7 @@ giftsys/
 
 目标：
 
-- 补齐 Demo 展示时最容易被问到的异常路径。
+- 补齐原型展示时最容易被问到的异常路径。
 - 整理启动说明和验收路径。
 
 计划更新：
@@ -207,7 +207,7 @@ giftsys/
 - README 包含安装、初始化、启动和演示账号说明。
 - 可以按照固定演示脚本完成一次端到端演示。
 - 页面提示清楚，不出现未处理异常堆栈。
-- PRD 中的 Demo 验收标准全部可对应到页面或数据变化。
+- PRD 中的原型验收标准全部可对应到页面或数据变化。
 
 ## 5. 用户验收检查清单
 
@@ -248,7 +248,7 @@ giftsys/
 
 | 时间 | 类型 | 文件 | 说明 |
 |---|---|---|---|
-| 2026-06-05 | 新增 | `giftsys_prd.md` | 创建 Demo 版 PRD，明确一期范围、状态机、库存规则、验收标准和未来迭代。 |
+| 2026-06-05 | 新增 | `giftsys_prd.md` | 创建原型版 PRD，明确一期范围、状态机、库存规则、验收标准和未来迭代。 |
 | 2026-06-05 | 新增 | `giftsys_implementation_log.md` | 创建实施计划、检查点、演示脚本和后续变更记录文档。 |
 | 2026-06-05 | 新增 | `app.py` | 创建 Streamlit 应用入口，提供员工端和管理端切换。 |
 | 2026-06-05 | 新增 | `config.py` | 添加数据库路径、状态枚举、演示管理员密码和基础常量。 |
@@ -260,7 +260,7 @@ giftsys/
 | 2026-06-05 | 新增 | `services/nl_parser.py` | 添加自然语言活动配置解析，输出人工确认用结构化草稿。 |
 | 2026-06-05 | 新增 | `views/employee_portal.py` | 添加员工端模拟登录、礼物筛选、预约、凭证和取消预约页面。 |
 | 2026-06-05 | 新增 | `views/admin_portal.py` | 添加管理端模拟登录、自然语言配置、确认发布、核销、库存看板和统计页面。 |
-| 2026-06-05 | 新增 | `utils/codegen.py` | 添加领取验证码和 Demo 二维码模拟图生成工具。 |
+| 2026-06-05 | 新增 | `utils/codegen.py` | 添加领取验证码和模拟二维码图生成工具。 |
 | 2026-06-05 | 新增 | `requirements.txt` | 添加 Streamlit 依赖。 |
 | 2026-06-05 | 新增 | `smoke_test.py` | 添加服务层快速回归脚本，覆盖资格、预约、取消、核销和重复操作阻断。 |
 | 2026-06-05 | 修改 | `README.md` | 补充项目说明、安装、启动、演示账号和快速回归命令。 |
@@ -322,12 +322,17 @@ giftsys/
 | 2026-06-07 | 修改 | `giftsys_prd.md` | 同步更新活动发布、预约管理、数据看板和时间槽二次确认规则。 |
 | 2026-06-07 | 修改 | `views/admin_portal.py`, `giftsys_prd.md` | 将“时间日历”更名为“领取时间管理”；主视图只保留 `streamlit-calendar` 月/日视图，时间修改下移到日历下方，日历明细时间槽可直接点击启停并二次确认。 |
 | 2026-06-07 | 修改 | `views/admin_portal.py`, `giftsys_prd.md` | 为日历增加今天和当前选中日期的差异化高亮；将楼宇/活动下方时段统一命名为“快捷显示timeslot”，并压缩时段按钮和“联系改期”按钮尺寸。 |
+| 2026-06-08 | 修改 | `database.py`, `seed_data.py`, `services/activity_service.py`, `views/admin_portal.py`, `views/employee_portal.py`, `smoke_test.py`, `giftsys_prd.md` | 扩展楼宇管理基础信息，支持维护地址、领取点、负责人、联系方式、备用负责人、排序、状态和备注；员工端选择楼宇后展示领取地址和联系人。 |
+| 2026-06-08 | 修改 | `services/activity_service.py`, `services/claim_service.py`, `views/admin_portal.py`, `smoke_test.py`, `giftsys_prd.md` | 在活动发布页加入已发布活动管理；支持编辑活动基础信息、受限调整日期、增发新礼物、下线/恢复活动；员工预约时校验活动必须上线，并增加日期缩短、增发礼物和下线预约拦截回归测试。 |
+| 2026-06-08 | 修改 | `services/activity_service.py`, `views/admin_portal.py`, `smoke_test.py`, `giftsys_prd.md` | 活动管理增加“礼物与库存管理”，支持新增礼物以及对已有礼物补充库存或减少可用库存；库存调整同步礼物总库存、库存流水和操作日志，并阻止减少超过可用库存的数量。 |
+| 2026-06-08 | 修改 | `services/activity_service.py`, `views/admin_portal.py`, `smoke_test.py`, `README.md`, `giftsys_prd.md`, `giftsys_implementation_log.md` | 去除固定工期表述；“联系改期”改为弹窗选择目标日期和时间段，模拟发送固定短信到员工手机号并记录操作日志。 |
+| 2026-06-08 | 新增 | `services/notification_service.py`, `database.py`, `services/activity_service.py`, `services/claim_service.py`, `views/employee_portal.py`, `views/admin_portal.py`, `smoke_test.py`, `giftsys_prd.md` | 员工端改为工号和手机号后四位登录；新增通知中心和 `notifications` 表；活动上线、预约成功、取消、过期、核销成功生成员工通知；管理员联系改期后生成员工端可操作通知，员工可同意或不同意改期。 |
 
 ## 8. 当前状态
 
 - PRD 已完成。
 - 实施计划已完成。
-- 项目骨架、数据库、演示数据、核心服务、员工端页面、管理端页面已完成第一版。
+- 项目骨架、数据库、演示数据、核心服务、员工端页面、管理端页面已完成当前原型版。
 - `python -m compileall .` 已通过。
 - `python smoke_test.py` 已通过。
 - Streamlit 依赖安装已按用户要求停止，由用户后续自行安装，应用启动验证待完成。

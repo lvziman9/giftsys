@@ -4,16 +4,24 @@ import streamlit as st
 
 from config import CLAIM_STATUS_LABELS
 from services.activity_service import (
+    authenticate_employee,
+    get_employee,
     get_latest_activity,
     list_activity_buildings,
     list_eligible_gifts,
+    list_employee_available_activities,
     list_employee_claims,
-    list_employees,
     list_inventory_for_gift,
-    list_published_activities,
     list_time_slots,
 )
 from services.claim_service import cancel_claim, create_claim
+from services.notification_service import (
+    count_unread_notifications,
+    list_notifications,
+    mark_all_notifications_read,
+    mark_notification_read,
+    respond_reschedule_notification,
+)
 from utils.codegen import demo_qr_svg_data_uri
 
 
@@ -31,6 +39,127 @@ def _format_slot(slot: dict) -> str:
         f"{slot['slot_date']} {time_label} "
         f"(剩余 {slot['remaining']}/{slot['capacity']})"
     )
+
+
+def _render_building_info(building: dict) -> None:
+    details = []
+    if building.get("address"):
+        details.append(f"地址：{building['address']}")
+    if building.get("pickup_location"):
+        details.append(f"领取点：{building['pickup_location']}")
+    if building.get("manager_name"):
+        contact = f" {building['manager_contact']}" if building.get("manager_contact") else ""
+        details.append(f"负责人：{building['manager_name']}{contact}")
+    if building.get("note"):
+        details.append(f"备注：{building['note']}")
+
+    if details:
+        with st.container(border=True):
+            for item in details:
+                st.caption(item)
+
+
+def _current_employee() -> dict | None:
+    employee_id = st.session_state.get("employee_id")
+    if not employee_id:
+        return None
+
+    employee = get_employee(int(employee_id))
+    if not employee:
+        st.session_state.pop("employee_id", None)
+        return None
+    return employee
+
+
+def _render_login() -> None:
+    st.header("员工端")
+    with st.form("employee_login_form"):
+        employee_no = st.text_input("工号", placeholder="例如 E1001")
+        phone_suffix = st.text_input("手机号后四位", type="password", max_chars=4)
+        submitted = st.form_submit_button("登录", type="primary")
+
+    if submitted:
+        employee = authenticate_employee(employee_no, phone_suffix)
+        if employee:
+            st.session_state["employee_id"] = employee["id"]
+            st.session_state["employee_feedback"] = f"已登录：{_format_employee(employee)}"
+            st.rerun()
+        else:
+            st.error("工号或手机号后四位不正确")
+
+
+def _notification_status(notification: dict) -> str:
+    if notification["type"] == "reschedule_request":
+        status_map = {
+            "pending": "待确认",
+            "accepted": "已同意",
+            "declined": "已不同意",
+        }
+        return status_map.get(notification["action_status"], notification["action_status"])
+    return "未读" if not notification["is_read"] else "已读"
+
+
+def _render_notification_center(employee: dict) -> None:
+    unread_count = count_unread_notifications(employee["id"])
+    with st.expander(f"通知中心（{unread_count} 未读）", expanded=unread_count > 0):
+        notifications = list_notifications(employee["id"])
+        if not notifications:
+            st.caption("暂无通知。")
+            return
+
+        if unread_count:
+            if st.button("全部标为已读", key="mark_all_notifications_read"):
+                mark_all_notifications_read(employee["id"])
+                st.rerun()
+
+        for notification in notifications:
+            with st.container(border=True):
+                st.markdown(f"**{notification['title']}**")
+                st.caption(f"{notification['created_at']} · {_notification_status(notification)}")
+                st.write(notification["content"])
+
+                if (
+                    notification["type"] == "reschedule_request"
+                    and notification["action_status"] == "pending"
+                ):
+                    cols = st.columns(2)
+                    with cols[0]:
+                        if st.button(
+                            "同意改期",
+                            type="primary",
+                            key=f"accept_reschedule_{notification['id']}",
+                            use_container_width=True,
+                        ):
+                            result = respond_reschedule_notification(
+                                notification["id"],
+                                employee["id"],
+                                accepted=True,
+                            )
+                            if result["ok"]:
+                                st.session_state["employee_feedback"] = result["message"]
+                                st.rerun()
+                            else:
+                                st.error(result["message"])
+                    with cols[1]:
+                        if st.button(
+                            "不同意",
+                            key=f"decline_reschedule_{notification['id']}",
+                            use_container_width=True,
+                        ):
+                            result = respond_reschedule_notification(
+                                notification["id"],
+                                employee["id"],
+                                accepted=False,
+                            )
+                            if result["ok"]:
+                                st.session_state["employee_feedback"] = result["message"]
+                                st.rerun()
+                            else:
+                                st.error(result["message"])
+                elif not notification["is_read"]:
+                    if st.button("标为已读", key=f"read_notification_{notification['id']}"):
+                        mark_notification_read(notification["id"], employee["id"])
+                        st.rerun()
 
 
 def _render_claim_card(claim: dict) -> None:
@@ -57,30 +186,38 @@ def _render_claim_card(claim: dict) -> None:
             if st.button("取消预约", key=f"cancel_{claim['id']}"):
                 result = cancel_claim(claim["id"], employee_id=claim["employee_id"])
                 if result["ok"]:
-                    st.success(result["message"])
+                    st.session_state["employee_feedback"] = result["message"]
                     st.rerun()
                 else:
                     st.error(result["message"])
 
 
 def render() -> None:
-    st.header("员工端")
-
-    employees = list_employees()
-    if not employees:
-        st.warning("暂无员工数据，请先初始化演示数据。")
+    employee = _current_employee()
+    if not employee:
+        _render_login()
         return
 
-    employee = st.selectbox(
-        "选择员工身份",
-        employees,
-        format_func=_format_employee,
-        key="employee_selector",
-    )
+    cols = st.columns([4, 1])
+    with cols[0]:
+        st.header("员工端")
+        st.caption(_format_employee(employee))
+    with cols[1]:
+        st.write("")
+        if st.button("退出登录", use_container_width=True):
+            st.session_state.pop("employee_id", None)
+            st.rerun()
 
-    activities = list_published_activities()
+    feedback = st.session_state.pop("employee_feedback", None)
+    if feedback:
+        st.success(feedback)
+
+    _render_notification_center(employee)
+
+    st.subheader("我的可领活动")
+    activities = list_employee_available_activities(employee["id"])
     if not activities:
-        st.warning("暂无已发布活动，请在管理后台创建并发布活动。")
+        st.warning("暂无适用于你的已上线活动。")
         return
 
     latest = get_latest_activity()
@@ -120,6 +257,7 @@ def render() -> None:
         key="employee_building_selector",
         disabled=bool(active_claim),
     )
+    _render_building_info(building)
 
     st.subheader("可领取礼物")
     gifts = list_eligible_gifts(employee["id"], activity["id"], building=building["name"])
@@ -177,7 +315,7 @@ def render() -> None:
                         time_slot_id=slot["id"],
                     )
                     if result["ok"]:
-                        st.success(result["message"])
+                        st.session_state["employee_feedback"] = result["message"]
                         st.rerun()
                     else:
                         st.error(result["message"])

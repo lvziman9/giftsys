@@ -6,10 +6,42 @@ from config import ADMIN_PASSWORD, BUILDINGS, DEFAULT_SLOT_CAPACITY, DEFAULT_TIM
 from database import get_connection, init_db
 
 
+DEMO_BUILDINGS = {
+    "A楼": {
+        "address": "上海市浦东新区世纪大道 100 号",
+        "pickup_location": "1层行政前台",
+        "manager_name": "周晴",
+        "manager_contact": "13800001001",
+        "backup_manager": "陈宇",
+        "note": "工作日 10:00-18:30 可领取，需携带工牌。",
+        "sort_order": 1,
+    },
+    "B楼": {
+        "address": "上海市浦东新区世纪大道 200 号",
+        "pickup_location": "3层行政服务台",
+        "manager_name": "林浩",
+        "manager_contact": "13800001002",
+        "backup_manager": "赵琪",
+        "note": "午休时段可在 12:00-12:30 领取。",
+        "sort_order": 2,
+    },
+    "C楼": {
+        "address": "上海市浦东新区世纪大道 300 号",
+        "pickup_location": "B1 仓储发放点",
+        "manager_name": "许安",
+        "manager_contact": "13800001003",
+        "backup_manager": "李娜",
+        "note": "进入仓储区需由负责人带领。",
+        "sort_order": 3,
+    },
+}
+
+
 def _clear_all(conn) -> None:
     tables = [
         "inventory_logs",
         "operation_logs",
+        "notifications",
         "claims",
         "time_slots",
         "inventory",
@@ -27,12 +59,54 @@ def _clear_all(conn) -> None:
 
 def _ensure_buildings(conn) -> None:
     for building in BUILDINGS:
+        profile = DEMO_BUILDINGS.get(building, {})
         conn.execute(
             """
-            INSERT OR IGNORE INTO buildings (name, is_active)
-            VALUES (?, 1)
+            INSERT INTO buildings (
+                name, address, pickup_location, manager_name, manager_contact,
+                backup_manager, note, sort_order, is_active, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+            ON CONFLICT(name) DO UPDATE SET
+                address = CASE
+                    WHEN buildings.address = '' THEN excluded.address
+                    ELSE buildings.address
+                END,
+                pickup_location = CASE
+                    WHEN buildings.pickup_location = '' THEN excluded.pickup_location
+                    ELSE buildings.pickup_location
+                END,
+                manager_name = CASE
+                    WHEN buildings.manager_name = '' THEN excluded.manager_name
+                    ELSE buildings.manager_name
+                END,
+                manager_contact = CASE
+                    WHEN buildings.manager_contact = '' THEN excluded.manager_contact
+                    ELSE buildings.manager_contact
+                END,
+                backup_manager = CASE
+                    WHEN buildings.backup_manager = '' THEN excluded.backup_manager
+                    ELSE buildings.backup_manager
+                END,
+                note = CASE
+                    WHEN buildings.note = '' THEN excluded.note
+                    ELSE buildings.note
+                END,
+                sort_order = CASE
+                    WHEN buildings.sort_order = 0 THEN excluded.sort_order
+                    ELSE buildings.sort_order
+                END
             """,
-            (building,),
+            (
+                building,
+                profile.get("address", ""),
+                profile.get("pickup_location", ""),
+                profile.get("manager_name", ""),
+                profile.get("manager_contact", ""),
+                profile.get("backup_manager", ""),
+                profile.get("note", ""),
+                int(profile.get("sort_order", 0)),
+            ),
         )
 
 
@@ -96,7 +170,7 @@ def seed_demo_data(force: bool = False) -> None:
             VALUES (?, ?, ?, ?, ?, 'published', 1, 1, CURRENT_TIMESTAMP)
             """,
             (
-                "2026 端午福利 Demo",
+                "2026 端午福利",
                 "节日福利",
                 "演示用活动：技术部可选键盘或耳机，销售部可领购物卡，全员可领零食礼包。",
                 "2026-06-08",
@@ -184,4 +258,4 @@ def seed_demo_data(force: bool = False) -> None:
 
 if __name__ == "__main__":
     seed_demo_data(force=True)
-    print("Demo data seeded.")
+    print("Sample data seeded.")

@@ -10,6 +10,7 @@ from services.inventory_service import (
     reserve_stock,
     write_inventory_log,
 )
+from services.notification_service import create_notification
 from utils.codegen import generate_claim_code
 
 
@@ -45,6 +46,34 @@ def _generate_unique_claim_code(conn) -> str:
         if not exists:
             return code
     raise ValueError("无法生成唯一凭证码，请重试")
+
+
+def _claim_notification_detail(conn, claim_id: int) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT
+            c.*,
+            a.name AS activity_name,
+            g.name AS gift_name,
+            t.slot_date,
+            t.start_time,
+            t.end_time
+        FROM claims c
+        JOIN activities a ON a.id = c.activity_id
+        JOIN gifts g ON g.id = c.gift_id
+        JOIN time_slots t ON t.id = c.time_slot_id
+        WHERE c.id = ?
+        """,
+        (claim_id,),
+    ).fetchone()
+    detail = row_to_dict(row)
+    if not detail:
+        raise ValueError("领取记录不存在")
+    return detail
+
+
+def _claim_time_text(claim: dict[str, Any]) -> str:
+    return f"{claim['slot_date']} {claim['start_time']}-{claim['end_time']}"
 
 
 def _check_eligibility(conn, employee_id: int, activity_id: int, gift_id: int) -> None:
@@ -95,6 +124,13 @@ def create_claim(
             if existing["status"] == "redeemed":
                 raise ValueError("你已经领取过该活动福利")
             raise ValueError("该活动已有最终处理记录，不能重新预约")
+
+        activity = conn.execute(
+            "SELECT status FROM activities WHERE id = ?",
+            (activity_id,),
+        ).fetchone()
+        if not activity or activity["status"] != "published":
+            raise ValueError("活动当前不可预约")
 
         _check_eligibility(conn, employee_id, activity_id, gift_id)
 
@@ -155,6 +191,19 @@ def create_claim(
             ),
         ).lastrowid
         write_inventory_log(conn, before, after, "reserve", claim_id, note="员工预约占用库存")
+        detail = _claim_notification_detail(conn, claim_id)
+        create_notification(
+            conn,
+            employee_id,
+            "claim_reserved",
+            "预约成功",
+            (
+                f"你已预约 {detail['activity_name']} / {detail['gift_name']}，"
+                f"领取时间：{_claim_time_text(detail)}，地点：{detail['building']}。"
+            ),
+            activity_id=activity_id,
+            claim_id=claim_id,
+        )
 
         conn.commit()
         return {"ok": True, "message": "预约成功", "claim": get_claim_by_id(claim_id)}
@@ -177,6 +226,7 @@ def cancel_claim(claim_id: int, employee_id: int | None = None) -> dict[str, Any
             raise ValueError("只能取消自己的预约")
         if claim_dict["status"] != "reserved":
             raise ValueError("只有已预约状态可以取消")
+        detail = _claim_notification_detail(conn, claim_id)
 
         before, after = release_stock(conn, claim_dict["inventory_id"], quantity=1)
         conn.execute(
@@ -198,6 +248,18 @@ def cancel_claim(claim_id: int, employee_id: int | None = None) -> dict[str, Any
             (claim_id,),
         )
         write_inventory_log(conn, before, after, "cancel", claim_id, note="员工取消预约释放库存")
+        create_notification(
+            conn,
+            claim_dict["employee_id"],
+            "claim_cancelled",
+            "预约已取消",
+            (
+                f"你已取消 {detail['activity_name']} / {detail['gift_name']}，"
+                f"原领取时间：{_claim_time_text(detail)}。"
+            ),
+            activity_id=claim_dict["activity_id"],
+            claim_id=claim_id,
+        )
         conn.commit()
         return {"ok": True, "message": "预约已取消"}
     except ValueError as exc:
@@ -217,6 +279,7 @@ def expire_claim(claim_id: int) -> dict[str, Any]:
             raise ValueError("领取记录不存在")
         if claim_dict["status"] != "reserved":
             raise ValueError("只有已预约状态可以过期释放")
+        detail = _claim_notification_detail(conn, claim_id)
 
         before, after = release_stock(conn, claim_dict["inventory_id"], quantity=1)
         conn.execute(
@@ -238,6 +301,18 @@ def expire_claim(claim_id: int) -> dict[str, Any]:
             (claim_id,),
         )
         write_inventory_log(conn, before, after, "expire", claim_id, note="过期未领取释放库存")
+        create_notification(
+            conn,
+            claim_dict["employee_id"],
+            "claim_expired",
+            "预约已过期",
+            (
+                f"{detail['activity_name']} / {detail['gift_name']} 的预约已过期，"
+                f"原领取时间：{_claim_time_text(detail)}。"
+            ),
+            activity_id=claim_dict["activity_id"],
+            claim_id=claim_id,
+        )
         conn.commit()
         return {"ok": True, "message": "预约已标记为过期并释放库存"}
     except ValueError as exc:
@@ -271,6 +346,7 @@ def redeem_claim_by_code(claim_code: str, admin_id: int | None = None) -> dict[s
             raise ValueError("该预约已过期，不能核销")
         if claim_dict["status"] == "rejected":
             raise ValueError("该预约已拒绝，不能核销")
+        detail = _claim_notification_detail(conn, claim_dict["id"])
 
         before, after = redeem_stock(conn, claim_dict["inventory_id"], quantity=1)
         conn.execute(
@@ -290,6 +366,18 @@ def redeem_claim_by_code(claim_code: str, admin_id: int | None = None) -> dict[s
             VALUES (?, 'redeem_claim', 'claim', ?, ?)
             """,
             (admin_id, claim_dict["id"], f"核销凭证 {normalized_code}"),
+        )
+        create_notification(
+            conn,
+            claim_dict["employee_id"],
+            "claim_redeemed",
+            "核销成功",
+            (
+                f"{detail['activity_name']} / {detail['gift_name']} 已完成核销，"
+                f"领取时间：{_claim_time_text(detail)}。"
+            ),
+            activity_id=claim_dict["activity_id"],
+            claim_id=claim_dict["id"],
         )
         conn.commit()
         return {"ok": True, "message": "核销成功", "claim": get_claim_by_id(claim_dict["id"])}

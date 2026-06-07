@@ -47,10 +47,9 @@ def demo_qr_svg_data_uri(value: str, size: int = 168) -> str:
 
     svg = (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" '
-        f'viewBox="0 0 {size} {size}" role="img" aria-label="Demo QR code">'
+        f'viewBox="0 0 {size} {size}" role="img" aria-label="领取凭证二维码">'
         + "".join(rects)
         + "</svg>"
     )
     encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
     return f"data:image/svg+xml;base64,{encoded}"
-

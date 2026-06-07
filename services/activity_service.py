@@ -6,6 +6,8 @@ from typing import Any
 
 from config import ADMIN_PASSWORD, BUILDINGS, DEFAULT_SLOT_CAPACITY, DEFAULT_TIME_RANGES
 from database import fetch_all, fetch_one, get_connection, row_to_dict, rows_to_dicts
+from services.inventory_service import write_inventory_log
+from services.notification_service import create_notification, notify_activity_published
 
 
 def list_employees() -> list[dict[str, Any]]:
@@ -37,34 +39,179 @@ def list_buildings(active_only: bool = True) -> list[dict[str, Any]]:
         SELECT *
         FROM buildings
         {where}
-        ORDER BY id
+        ORDER BY sort_order, id
         """
     )
 
 
-def add_building(name: str) -> dict[str, Any]:
+def _clean_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _next_building_sort_order(conn) -> int:
+    row = conn.execute(
+        "SELECT COALESCE(MAX(sort_order), 0) + 1 AS next_sort FROM buildings"
+    ).fetchone()
+    return int(row["next_sort"] or 1)
+
+
+def add_building(
+    name: str,
+    address: str = "",
+    pickup_location: str = "",
+    manager_name: str = "",
+    manager_contact: str = "",
+    backup_manager: str = "",
+    note: str = "",
+    sort_order: int | None = None,
+    is_active: bool = True,
+    admin_id: int | None = None,
+) -> dict[str, Any]:
     building_name = name.strip()
     if not building_name:
         raise ValueError("楼宇名称不能为空")
 
     with get_connection() as conn:
+        normalized_sort_order = int(sort_order) if sort_order is not None else _next_building_sort_order(conn)
         conn.execute(
             """
-            INSERT OR IGNORE INTO buildings (name, is_active)
-            VALUES (?, 1)
+            INSERT INTO buildings (
+                name, address, pickup_location, manager_name, manager_contact,
+                backup_manager, note, sort_order, is_active, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(name) DO UPDATE SET
+                address = CASE
+                    WHEN excluded.address != '' THEN excluded.address
+                    ELSE buildings.address
+                END,
+                pickup_location = CASE
+                    WHEN excluded.pickup_location != '' THEN excluded.pickup_location
+                    ELSE buildings.pickup_location
+                END,
+                manager_name = CASE
+                    WHEN excluded.manager_name != '' THEN excluded.manager_name
+                    ELSE buildings.manager_name
+                END,
+                manager_contact = CASE
+                    WHEN excluded.manager_contact != '' THEN excluded.manager_contact
+                    ELSE buildings.manager_contact
+                END,
+                backup_manager = CASE
+                    WHEN excluded.backup_manager != '' THEN excluded.backup_manager
+                    ELSE buildings.backup_manager
+                END,
+                note = CASE
+                    WHEN excluded.note != '' THEN excluded.note
+                    ELSE buildings.note
+                END,
+                sort_order = excluded.sort_order,
+                is_active = excluded.is_active,
+                updated_at = CURRENT_TIMESTAMP
             """,
+            (
+                building_name,
+                _clean_text(address),
+                _clean_text(pickup_location),
+                _clean_text(manager_name),
+                _clean_text(manager_contact),
+                _clean_text(backup_manager),
+                _clean_text(note),
+                normalized_sort_order,
+                1 if is_active else 0,
+            ),
+        )
+        building = conn.execute(
+            "SELECT * FROM buildings WHERE name = ?",
             (building_name,),
+        ).fetchone()
+        building_id = building["id"] if building else None
+        conn.execute(
+            """
+            INSERT INTO operation_logs (admin_id, action, target_type, target_id, note)
+            VALUES (?, 'upsert_building', 'building', ?, ?)
+            """,
+            (admin_id, building_id, f"维护楼宇基础信息：{building_name}"),
         )
     return fetch_one("SELECT * FROM buildings WHERE name = ?", (building_name,)) or {}
+
+
+def update_building(
+    building_id: int,
+    address: str,
+    pickup_location: str,
+    manager_name: str,
+    manager_contact: str,
+    backup_manager: str,
+    note: str,
+    sort_order: int,
+    is_active: bool,
+    admin_id: int | None = None,
+) -> dict[str, Any]:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM buildings WHERE id = ?",
+            (building_id,),
+        ).fetchone()
+        if not row:
+            raise ValueError("楼宇不存在")
+
+        conn.execute(
+            """
+            UPDATE buildings
+            SET address = ?,
+                pickup_location = ?,
+                manager_name = ?,
+                manager_contact = ?,
+                backup_manager = ?,
+                note = ?,
+                sort_order = ?,
+                is_active = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                _clean_text(address),
+                _clean_text(pickup_location),
+                _clean_text(manager_name),
+                _clean_text(manager_contact),
+                _clean_text(backup_manager),
+                _clean_text(note),
+                int(sort_order),
+                1 if is_active else 0,
+                building_id,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO operation_logs (admin_id, action, target_type, target_id, note)
+            VALUES (?, 'update_building', 'building', ?, ?)
+            """,
+            (admin_id, building_id, f"更新楼宇基础信息：{row['name']}"),
+        )
+
+    return fetch_one("SELECT * FROM buildings WHERE id = ?", (building_id,)) or {}
 
 
 def list_activity_buildings(activity_id: int) -> list[dict[str, Any]]:
     return fetch_all(
         """
-        SELECT DISTINCT i.building AS name
+        SELECT DISTINCT
+            i.building AS name,
+            b.id,
+            b.address,
+            b.pickup_location,
+            b.manager_name,
+            b.manager_contact,
+            b.backup_manager,
+            b.note,
+            b.sort_order,
+            b.is_active
         FROM inventory i
+        JOIN buildings b ON b.name = i.building
         WHERE i.activity_id = ?
-        ORDER BY i.building
+          AND b.is_active = 1
+        ORDER BY b.sort_order, i.building
         """,
         (activity_id,),
     )
@@ -72,6 +219,25 @@ def list_activity_buildings(activity_id: int) -> list[dict[str, Any]]:
 
 def get_employee(employee_id: int) -> dict[str, Any] | None:
     return fetch_one("SELECT * FROM employees WHERE id = ?", (employee_id,))
+
+
+def authenticate_employee(employee_no: str, phone_suffix: str) -> dict[str, Any] | None:
+    employee = fetch_one(
+        """
+        SELECT *
+        FROM employees
+        WHERE UPPER(employee_no) = UPPER(?)
+        """,
+        (employee_no.strip(),),
+    )
+    if not employee:
+        return None
+
+    suffix = phone_suffix.strip()
+    phone = str(employee.get("phone") or "")
+    if not suffix or not phone.endswith(suffix):
+        return None
+    return employee
 
 
 def authenticate_admin(password: str) -> dict[str, Any] | None:
@@ -87,6 +253,52 @@ def list_published_activities() -> list[dict[str, Any]]:
         FROM activities
         WHERE status = 'published'
         ORDER BY published_at DESC, id DESC
+        """
+    )
+
+
+def list_employee_available_activities(employee_id: int) -> list[dict[str, Any]]:
+    return fetch_all(
+        """
+        SELECT DISTINCT a.*
+        FROM activities a
+        JOIN eligibility_rules er ON er.activity_id = a.id
+        JOIN employees e
+          ON e.id = ?
+         AND (er.department = e.department OR er.department = 'ALL')
+        WHERE a.status = 'published'
+        ORDER BY a.published_at DESC, a.id DESC
+        """,
+        (employee_id,),
+    )
+
+
+def list_admin_activities() -> list[dict[str, Any]]:
+    return fetch_all(
+        """
+        SELECT
+            a.*,
+            (SELECT COUNT(*) FROM gifts g WHERE g.activity_id = a.id) AS gift_count,
+            (
+                SELECT COUNT(*)
+                FROM claims c
+                WHERE c.activity_id = a.id
+                  AND c.status = 'reserved'
+            ) AS reserved_count,
+            (
+                SELECT COUNT(*)
+                FROM claims c
+                WHERE c.activity_id = a.id
+                  AND c.status = 'redeemed'
+            ) AS redeemed_count,
+            (
+                SELECT COUNT(*)
+                FROM claims c
+                WHERE c.activity_id = a.id
+            ) AS claim_count
+        FROM activities a
+        WHERE a.status IN ('published', 'offline')
+        ORDER BY a.published_at DESC, a.id DESC
         """
     )
 
@@ -387,6 +599,409 @@ def dashboard_summary(activity_id: int | None = None) -> dict[str, Any]:
     }
 
 
+def list_activity_gift_rules(activity_id: int) -> list[dict[str, Any]]:
+    return fetch_all(
+        """
+        SELECT
+            g.id,
+            g.name,
+            g.spec,
+            g.category,
+            g.total_stock,
+            g.per_person_limit,
+            (
+                SELECT GROUP_CONCAT(
+                    CASE
+                        WHEN er.department = 'ALL' THEN '全员'
+                        ELSE er.department
+                    END,
+                    '、'
+                )
+                FROM eligibility_rules er
+                WHERE er.gift_id = g.id
+            ) AS departments,
+            (
+                SELECT COALESCE(SUM(i.total_stock), 0)
+                FROM inventory i
+                WHERE i.gift_id = g.id
+            ) AS inventory_total,
+            (
+                SELECT COALESCE(SUM(i.available_stock), 0)
+                FROM inventory i
+                WHERE i.gift_id = g.id
+            ) AS available_stock,
+            (
+                SELECT COALESCE(SUM(i.reserved_stock), 0)
+                FROM inventory i
+                WHERE i.gift_id = g.id
+            ) AS reserved_stock,
+            (
+                SELECT COALESCE(SUM(i.redeemed_stock), 0)
+                FROM inventory i
+                WHERE i.gift_id = g.id
+            ) AS redeemed_stock
+        FROM gifts g
+        WHERE g.activity_id = ?
+        ORDER BY g.id
+        """,
+        (activity_id,),
+    )
+
+
+def _activity_building_names(conn, activity_id: int) -> list[str]:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT building AS name
+        FROM time_slots
+        WHERE activity_id = ?
+        ORDER BY building
+        """,
+        (activity_id,),
+    ).fetchall()
+    if rows:
+        return [row["name"] for row in rows]
+
+    rows = conn.execute(
+        """
+        SELECT DISTINCT building AS name
+        FROM inventory
+        WHERE activity_id = ?
+        ORDER BY building
+        """,
+        (activity_id,),
+    ).fetchall()
+    if rows:
+        return [row["name"] for row in rows]
+
+    return _active_building_names(conn)
+
+
+def _default_time_slots_for_dates(slot_dates: set[date]) -> list[dict[str, Any]]:
+    slots: list[dict[str, Any]] = []
+    for slot_date in sorted(slot_dates):
+        for start_time, end_time in DEFAULT_TIME_RANGES:
+            slots.append(
+                {
+                    "date": slot_date.isoformat(),
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "capacity": DEFAULT_SLOT_CAPACITY,
+                }
+            )
+    return slots
+
+
+def update_activity_basic(
+    activity_id: int,
+    name: str,
+    description: str,
+    start_date: Any,
+    end_date: Any,
+    allow_cancel: bool,
+    expire_release: bool,
+    admin_id: int | None = None,
+) -> dict[str, Any]:
+    activity_name = _clean_text(name)
+    if not activity_name:
+        raise ValueError("活动名称不能为空")
+
+    normalized_start = _normalize_date(start_date, "开始日期")
+    normalized_end = _normalize_date(end_date, "结束日期")
+    new_dates = set(_date_range(normalized_start, normalized_end))
+
+    with get_connection() as conn:
+        activity = conn.execute(
+            "SELECT * FROM activities WHERE id = ?",
+            (activity_id,),
+        ).fetchone()
+        if not activity:
+            raise ValueError("活动不存在")
+
+        old_dates = set(_date_range(activity["start_date"], activity["end_date"]))
+        removed_dates = old_dates - new_dates
+        added_dates = new_dates - old_dates
+
+        if removed_dates:
+            placeholders = ",".join("?" for _ in removed_dates)
+            rows = conn.execute(
+                f"""
+                SELECT COUNT(*) AS count
+                FROM claims c
+                JOIN time_slots t ON t.id = c.time_slot_id
+                WHERE c.activity_id = ?
+                  AND t.slot_date IN ({placeholders})
+                """,
+                (activity_id, *(item.isoformat() for item in removed_dates)),
+            ).fetchone()
+            if rows["count"]:
+                raise ValueError("缩短日期范围会移除已有预约记录的日期，请先联系改期或处理预约")
+
+            conn.execute(
+                f"""
+                DELETE FROM time_slots
+                WHERE activity_id = ?
+                  AND slot_date IN ({placeholders})
+                """,
+                (activity_id, *(item.isoformat() for item in removed_dates)),
+            )
+
+        if added_dates:
+            _insert_time_slots(
+                conn,
+                activity_id,
+                _activity_building_names(conn, activity_id),
+                _default_time_slots_for_dates(added_dates),
+            )
+
+        conn.execute(
+            """
+            UPDATE activities
+            SET name = ?,
+                description = ?,
+                start_date = ?,
+                end_date = ?,
+                allow_cancel = ?,
+                expire_release = ?
+            WHERE id = ?
+            """,
+            (
+                activity_name,
+                _clean_text(description),
+                normalized_start,
+                normalized_end,
+                1 if allow_cancel else 0,
+                1 if expire_release else 0,
+                activity_id,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO operation_logs (admin_id, action, target_type, target_id, note)
+            VALUES (?, 'update_activity', 'activity', ?, ?)
+            """,
+            (
+                admin_id,
+                activity_id,
+                (
+                    f"活动基础信息更新；新增日期 {len(added_dates)} 天，"
+                    f"移除日期 {len(removed_dates)} 天"
+                ),
+            ),
+        )
+
+    return get_activity(activity_id) or {}
+
+
+def set_activity_status(
+    activity_id: int,
+    status: str,
+    admin_id: int | None = None,
+) -> dict[str, Any]:
+    if status not in {"published", "offline"}:
+        raise ValueError("活动状态无效")
+
+    with get_connection() as conn:
+        activity = conn.execute(
+            "SELECT * FROM activities WHERE id = ?",
+            (activity_id,),
+        ).fetchone()
+        if not activity:
+            raise ValueError("活动不存在")
+
+        conn.execute(
+            """
+            UPDATE activities
+            SET status = ?
+            WHERE id = ?
+            """,
+            (status, activity_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO operation_logs (admin_id, action, target_type, target_id, note)
+            VALUES (?, ?, 'activity', ?, ?)
+            """,
+            (
+                admin_id,
+                "publish_activity_again" if status == "published" else "offline_activity",
+                activity_id,
+                "活动恢复上线" if status == "published" else "活动下线",
+            ),
+        )
+        if status == "published":
+            notify_activity_published(conn, activity_id)
+
+    return get_activity(activity_id) or {}
+
+
+def add_gift_to_activity(
+    activity_id: int,
+    rule: dict[str, Any],
+    admin_id: int | None = None,
+) -> int:
+    with get_connection() as conn:
+        activity = conn.execute(
+            "SELECT * FROM activities WHERE id = ?",
+            (activity_id,),
+        ).fetchone()
+        if not activity:
+            raise ValueError("活动不存在")
+
+        gift_name = _normalize_name(rule.get("name", ""))
+        department = _normalize_department(rule.get("department", ""))
+        total_stock = int(rule.get("total_stock", 0))
+        description = _clean_text(rule.get("description", ""))
+        if not gift_name:
+            raise ValueError("礼物名称不能为空")
+        if not department:
+            raise ValueError("礼物所属部门不能为空")
+        if total_stock <= 0:
+            raise ValueError("礼物初始数量必须大于 0")
+
+        activity_buildings = _activity_building_names(conn, activity_id)
+        allocation = _allocation_for_buildings(
+            rule.get("building_allocation") or {},
+            activity_buildings,
+        )
+
+        gift_id = conn.execute(
+            """
+            INSERT INTO gifts (
+                activity_id, name, spec, category, total_stock, per_person_limit
+            )
+            VALUES (?, ?, ?, '其他', ?, ?)
+            """,
+            (
+                activity_id,
+                gift_name,
+                description or "增发礼物",
+                total_stock,
+                int(rule.get("per_person_limit", 1)),
+            ),
+        ).lastrowid
+        conn.execute(
+            """
+            INSERT INTO eligibility_rules (activity_id, department, gift_id)
+            VALUES (?, ?, ?)
+            """,
+            (activity_id, department, gift_id),
+        )
+
+        per_building = _allocate_stock(total_stock, allocation)
+        for building, qty in per_building.items():
+            conn.execute(
+                """
+                INSERT INTO inventory (
+                    activity_id, gift_id, building, total_stock, available_stock
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (activity_id, gift_id, building, qty, qty),
+            )
+
+        conn.execute(
+            """
+            INSERT INTO operation_logs (admin_id, action, target_type, target_id, note)
+            VALUES (?, 'add_activity_gift', 'gift', ?, ?)
+            """,
+            (admin_id, gift_id, f"活动 {activity_id} 增发礼物：{gift_name}"),
+        )
+        return int(gift_id)
+
+
+def adjust_activity_inventory(
+    inventory_id: int,
+    adjustment_type: str,
+    quantity: int,
+    reason: str = "",
+    admin_id: int | None = None,
+) -> dict[str, Any]:
+    if adjustment_type not in {"increase", "decrease"}:
+        raise ValueError("库存调整类型无效")
+    if quantity <= 0:
+        raise ValueError("调整数量必须大于 0")
+
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT i.*, g.name AS gift_name
+            FROM inventory i
+            JOIN gifts g ON g.id = i.gift_id
+            WHERE i.id = ?
+            """,
+            (inventory_id,),
+        ).fetchone()
+        before = row_to_dict(row)
+        if not before:
+            raise ValueError("库存记录不存在")
+
+        if adjustment_type == "decrease" and quantity > before["available_stock"]:
+            raise ValueError("减少数量不能超过当前可用库存")
+
+        delta = quantity if adjustment_type == "increase" else -quantity
+        after_total = before["total_stock"] + delta
+        after_available = before["available_stock"] + delta
+        if after_total < 0 or after_available < 0:
+            raise ValueError("库存调整后不能小于 0")
+
+        conn.execute(
+            """
+            UPDATE inventory
+            SET total_stock = ?,
+                available_stock = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (after_total, after_available, inventory_id),
+        )
+        conn.execute(
+            """
+            UPDATE gifts
+            SET total_stock = total_stock + ?
+            WHERE id = ?
+            """,
+            (delta, before["gift_id"]),
+        )
+        after = row_to_dict(
+            conn.execute(
+                "SELECT * FROM inventory WHERE id = ?",
+                (inventory_id,),
+            ).fetchone()
+        )
+        note = _clean_text(reason) or ("补充库存" if adjustment_type == "increase" else "减少可用库存")
+        write_inventory_log(
+            conn,
+            before,
+            after,
+            "stock_increase" if adjustment_type == "increase" else "stock_decrease",
+            quantity=quantity,
+            note=note,
+        )
+        conn.execute(
+            """
+            INSERT INTO operation_logs (admin_id, action, target_type, target_id, note)
+            VALUES (?, ?, 'inventory', ?, ?)
+            """,
+            (
+                admin_id,
+                "increase_inventory" if adjustment_type == "increase" else "decrease_inventory",
+                inventory_id,
+                f"{before['gift_name']} / {before['building']} / {note} / 数量 {quantity}",
+            ),
+        )
+
+    result = fetch_one(
+        """
+        SELECT i.*, g.name AS gift_name
+        FROM inventory i
+        JOIN gifts g ON g.id = i.gift_id
+        WHERE i.id = ?
+        """,
+        (inventory_id,),
+    )
+    return result or {}
+
+
 def _allocate_stock(total_stock: int, allocations: dict[str, int]) -> dict[str, int]:
     if not allocations:
         allocations = {building: 1 for building in BUILDINGS}
@@ -422,7 +1037,7 @@ def _active_building_names(conn) -> list[str]:
         SELECT name
         FROM buildings
         WHERE is_active = 1
-        ORDER BY id
+        ORDER BY sort_order, id
         """
     ).fetchall()
     return [row["name"] for row in rows]
@@ -510,7 +1125,7 @@ def publish_activity_from_config(config: dict[str, Any], admin_id: int | None = 
                     (
                         activity_id,
                         gift_name,
-                        description or "Demo 配置礼物",
+                        description or "配置礼物",
                         "其他",
                         total_stock,
                         int(rule.get("per_person_limit", 1)),
@@ -545,6 +1160,7 @@ def publish_activity_from_config(config: dict[str, Any], admin_id: int | None = 
                 """,
                 (admin_id, activity_id, "通过礼物规则配置发布活动"),
             )
+            notify_activity_published(conn, activity_id)
             return activity_id
 
         gift_name_to_id: dict[str, int] = {}
@@ -563,7 +1179,7 @@ def publish_activity_from_config(config: dict[str, Any], admin_id: int | None = 
                 (
                     activity_id,
                     gift_name,
-                    gift.get("spec", "Demo 配置礼物"),
+                    gift.get("spec", "配置礼物"),
                     gift.get("category", "其他"),
                     total_stock,
                     int(gift.get("per_person_limit", 1)),
@@ -612,6 +1228,7 @@ def publish_activity_from_config(config: dict[str, Any], admin_id: int | None = 
             """,
             (admin_id, activity_id, "通过配置确认页发布活动"),
         )
+        notify_activity_published(conn, activity_id)
 
     return activity_id
 
@@ -899,6 +1516,7 @@ def list_day_schedule(slot_date: str) -> list[dict[str, Any]]:
                 SELECT
                     c.*,
                     e.name AS employee_name,
+                    e.phone AS employee_phone,
                     e.department,
                     a.name AS activity_name,
                     g.name AS gift_name
@@ -921,6 +1539,170 @@ def list_day_schedule(slot_date: str) -> list[dict[str, Any]]:
     for slot in slots:
         slot["claims"] = claims_by_slot.get(slot["id"], [])
     return slots
+
+
+def get_reschedule_context(claim_id: int) -> dict[str, Any]:
+    claim = fetch_one(
+        """
+        SELECT
+            c.*,
+            e.name AS employee_name,
+            e.department,
+            e.phone AS employee_phone,
+            a.name AS activity_name,
+            a.start_date,
+            a.end_date,
+            a.status AS activity_status,
+            g.name AS gift_name,
+            t.slot_date,
+            t.start_time,
+            t.end_time,
+            t.building AS slot_building
+        FROM claims c
+        JOIN employees e ON e.id = c.employee_id
+        JOIN activities a ON a.id = c.activity_id
+        JOIN gifts g ON g.id = c.gift_id
+        JOIN time_slots t ON t.id = c.time_slot_id
+        WHERE c.id = ?
+        """,
+        (claim_id,),
+    )
+    if not claim:
+        raise ValueError("预约记录不存在")
+    return claim
+
+
+def list_reschedule_time_slots(
+    activity_id: int,
+    building: str,
+    slot_date: str,
+) -> list[dict[str, Any]]:
+    normalized_date = _normalize_date(slot_date, "目标日期")
+    return fetch_all(
+        """
+        SELECT
+            t.*,
+            a.name AS activity_name,
+            t.capacity - t.reserved_count AS remaining
+        FROM time_slots t
+        JOIN activities a ON a.id = t.activity_id
+        WHERE t.activity_id = ?
+          AND t.building = ?
+          AND t.slot_date = ?
+          AND t.is_available = 1
+          AND t.capacity > t.reserved_count
+          AND a.status = 'published'
+        ORDER BY t.start_time, t.end_time
+        """,
+        (activity_id, building, normalized_date),
+    )
+
+
+def _format_sms_slot(slot_date: str, start_time: str, end_time: str) -> str:
+    return f"{slot_date} {start_time}-{end_time}"
+
+
+def _reschedule_sms_content(claim: dict[str, Any], target_slot: dict[str, Any]) -> str:
+    old_time = _format_sms_slot(
+        claim["slot_date"],
+        claim["start_time"],
+        claim["end_time"],
+    )
+    target_time = _format_sms_slot(
+        target_slot["slot_date"],
+        target_slot["start_time"],
+        target_slot["end_time"],
+    )
+    return (
+        f"【GiftFlow】{claim['employee_name']}您好，您的{claim['activity_name']}领取时间需调整。"
+        f"原时间：{old_time}；建议改为：{target_time}。"
+        f"领取礼物：{claim['gift_name']}；地点：{claim['building']}。如有疑问请联系行政。"
+    )
+
+
+def send_reschedule_sms(
+    claim_id: int,
+    target_time_slot_id: int,
+    admin_id: int | None = None,
+) -> dict[str, Any]:
+    claim = get_reschedule_context(claim_id)
+    if claim["status"] != "reserved":
+        raise ValueError("只有已预约记录可以联系改期")
+
+    phone = _clean_text(claim.get("employee_phone"))
+    if not phone:
+        raise ValueError("该员工未维护手机号，无法发送改期短信")
+
+    with get_connection() as conn:
+        target_row = conn.execute(
+            """
+            SELECT
+                t.*,
+                a.name AS activity_name,
+                t.capacity - t.reserved_count AS remaining
+            FROM time_slots t
+            JOIN activities a ON a.id = t.activity_id
+            WHERE t.id = ?
+            """,
+            (target_time_slot_id,),
+        ).fetchone()
+        target_slot = row_to_dict(target_row)
+        if not target_slot:
+            raise ValueError("目标领取时间不存在")
+        if target_slot["activity_id"] != claim["activity_id"]:
+            raise ValueError("目标时间必须属于同一活动")
+        if target_slot["building"] != claim["building"]:
+            raise ValueError("目标时间必须属于同一楼宇")
+        if not target_slot["is_available"]:
+            raise ValueError("目标时间当前不可领取")
+        if target_slot["remaining"] <= 0:
+            raise ValueError("目标时间已满员")
+
+        content = _reschedule_sms_content(claim, target_slot)
+        old_time = _format_sms_slot(
+            claim["slot_date"],
+            claim["start_time"],
+            claim["end_time"],
+        )
+        target_time = _format_sms_slot(
+            target_slot["slot_date"],
+            target_slot["start_time"],
+            target_slot["end_time"],
+        )
+        conn.execute(
+            """
+            INSERT INTO operation_logs (admin_id, action, target_type, target_id, note)
+            VALUES (?, 'send_reschedule_sms', 'claim', ?, ?)
+            """,
+            (
+                admin_id,
+                claim_id,
+                (
+                    f"模拟短信发送至 {phone}；"
+                    f"员工 {claim['employee_name']}；原时间 {old_time}；目标时间 {target_time}；"
+                    f"内容：{content}"
+                ),
+            ),
+        )
+        notification_id = create_notification(
+            conn,
+            claim["employee_id"],
+            "reschedule_request",
+            "改期提醒",
+            content,
+            activity_id=claim["activity_id"],
+            claim_id=claim_id,
+            target_time_slot_id=target_time_slot_id,
+            action_status="pending",
+        )
+
+    return {
+        "claim": claim,
+        "target_slot": target_slot,
+        "phone": phone,
+        "sms_content": content,
+        "notification_id": notification_id,
+    }
 
 
 def log_reschedule_contact(claim_id: int, admin_id: int | None = None) -> dict[str, Any]:

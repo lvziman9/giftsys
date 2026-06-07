@@ -59,7 +59,15 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS buildings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
+                address TEXT NOT NULL DEFAULT '',
+                pickup_location TEXT NOT NULL DEFAULT '',
+                manager_name TEXT NOT NULL DEFAULT '',
+                manager_contact TEXT NOT NULL DEFAULT '',
+                backup_manager TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                sort_order INTEGER NOT NULL DEFAULT 0,
                 is_active INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -200,9 +208,40 @@ def init_db() -> None:
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (admin_id) REFERENCES admins(id) ON DELETE SET NULL
             );
+
+            CREATE TABLE IF NOT EXISTS notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id INTEGER NOT NULL,
+                type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                activity_id INTEGER,
+                claim_id INTEGER,
+                target_time_slot_id INTEGER,
+                is_read INTEGER NOT NULL DEFAULT 0,
+                action_status TEXT NOT NULL DEFAULT 'none',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                read_at TEXT,
+                handled_at TEXT,
+                FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+                FOREIGN KEY (activity_id) REFERENCES activities(id) ON DELETE CASCADE,
+                FOREIGN KEY (claim_id) REFERENCES claims(id) ON DELETE CASCADE,
+                FOREIGN KEY (target_time_slot_id) REFERENCES time_slots(id) ON DELETE SET NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_notifications_employee
+            ON notifications (employee_id, is_read, id);
             """
         )
         _ensure_column(conn, "time_slots", "is_available", "INTEGER NOT NULL DEFAULT 1")
+        _ensure_column(conn, "buildings", "address", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "buildings", "pickup_location", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "buildings", "manager_name", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "buildings", "manager_contact", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "buildings", "backup_manager", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "buildings", "note", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "buildings", "sort_order", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "buildings", "updated_at", "TEXT")
 
 
 def _ensure_column(
