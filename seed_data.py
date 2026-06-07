@@ -1,0 +1,187 @@
+from __future__ import annotations
+
+from datetime import date, timedelta
+
+from config import ADMIN_PASSWORD, BUILDINGS, DEFAULT_SLOT_CAPACITY, DEFAULT_TIME_RANGES
+from database import get_connection, init_db
+
+
+def _clear_all(conn) -> None:
+    tables = [
+        "inventory_logs",
+        "operation_logs",
+        "claims",
+        "time_slots",
+        "inventory",
+        "eligibility_rules",
+        "gifts",
+        "activities",
+        "admins",
+        "employees",
+        "buildings",
+    ]
+    for table in tables:
+        conn.execute(f"DELETE FROM {table}")
+    conn.execute("DELETE FROM sqlite_sequence")
+
+
+def _ensure_buildings(conn) -> None:
+    for building in BUILDINGS:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO buildings (name, is_active)
+            VALUES (?, 1)
+            """,
+            (building,),
+        )
+
+
+def _allocate_stock(total_stock: int, allocations: dict[str, int]) -> dict[str, int]:
+    buildings = list(allocations.keys())
+    total_weight = sum(allocations.values()) or len(buildings)
+    result: dict[str, int] = {}
+    used = 0
+
+    for building in buildings[:-1]:
+        qty = int(total_stock * allocations[building] / total_weight)
+        result[building] = qty
+        used += qty
+
+    result[buildings[-1]] = total_stock - used
+    return result
+
+
+def seed_demo_data(force: bool = False) -> None:
+    init_db()
+
+    with get_connection() as conn:
+        _ensure_buildings(conn)
+        existing = conn.execute("SELECT COUNT(*) AS count FROM activities").fetchone()["count"]
+        if existing and not force:
+            return
+
+        if force:
+            _clear_all(conn)
+            _ensure_buildings(conn)
+
+        employees = [
+            ("E1001", "张晨", "技术部", "P6", "13800000001"),
+            ("E1002", "李娜", "销售部", "P5", "13800000002"),
+            ("E1003", "王敏", "职能部", "P4", "13800000003"),
+            ("E1004", "陈宇", "技术部", "P7", "13800000004"),
+            ("E1005", "赵琪", "运营部", "P5", "13800000005"),
+        ]
+        conn.executemany(
+            """
+            INSERT INTO employees (employee_no, name, department, level, phone)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            employees,
+        )
+
+        conn.execute(
+            """
+            INSERT INTO admins (username, password, display_name)
+            VALUES (?, ?, ?)
+            """,
+            ("admin", ADMIN_PASSWORD, "行政管理员"),
+        )
+
+        activity_id = conn.execute(
+            """
+            INSERT INTO activities (
+                name, activity_type, description, start_date, end_date, status,
+                allow_cancel, expire_release, published_at
+            )
+            VALUES (?, ?, ?, ?, ?, 'published', 1, 1, CURRENT_TIMESTAMP)
+            """,
+            (
+                "2026 端午福利 Demo",
+                "节日福利",
+                "演示用活动：技术部可选键盘或耳机，销售部可领购物卡，全员可领零食礼包。",
+                "2026-06-08",
+                "2026-06-12",
+            ),
+        ).lastrowid
+
+        gift_specs = [
+            ("机械键盘", "87 键无线机械键盘", "数码类", 30),
+            ("降噪耳机", "头戴式主动降噪耳机", "数码类", 20),
+            ("500元购物卡", "通用购物卡，面值 500 元", "生活用品类", 40),
+            ("零食大礼包", "节日零食组合装", "零食类", 100),
+        ]
+        gift_ids: dict[str, int] = {}
+        for name, spec, category, total_stock in gift_specs:
+            gift_ids[name] = conn.execute(
+                """
+                INSERT INTO gifts (activity_id, name, spec, category, total_stock)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (activity_id, name, spec, category, total_stock),
+            ).lastrowid
+
+        rules = {
+            "技术部": ["机械键盘", "降噪耳机"],
+            "销售部": ["500元购物卡"],
+            "ALL": ["零食大礼包"],
+        }
+        for department, gift_names in rules.items():
+            for gift_name in gift_names:
+                conn.execute(
+                    """
+                    INSERT INTO eligibility_rules (activity_id, department, gift_id)
+                    VALUES (?, ?, ?)
+                    """,
+                    (activity_id, department, gift_ids[gift_name]),
+                )
+
+        allocations = {"A楼": 50, "B楼": 30, "C楼": 20}
+        for gift_name, gift_id in gift_ids.items():
+            total_stock = next(item[3] for item in gift_specs if item[0] == gift_name)
+            per_building = _allocate_stock(total_stock, allocations)
+            for building in BUILDINGS:
+                qty = per_building.get(building, 0)
+                conn.execute(
+                    """
+                    INSERT INTO inventory (
+                        activity_id, gift_id, building, total_stock, available_stock
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (activity_id, gift_id, building, qty, qty),
+                )
+
+        first_slot_date = date(2026, 6, 8)
+        slot_dates = [(first_slot_date + timedelta(days=offset)).isoformat() for offset in range(5)]
+        for building in BUILDINGS:
+            for slot_date in slot_dates:
+                for start_time, end_time in DEFAULT_TIME_RANGES:
+                    conn.execute(
+                        """
+                        INSERT INTO time_slots (
+                            activity_id, building, slot_date, start_time, end_time, capacity
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            activity_id,
+                            building,
+                            slot_date,
+                            start_time,
+                            end_time,
+                            DEFAULT_SLOT_CAPACITY,
+                        ),
+                    )
+
+        conn.execute(
+            """
+            INSERT INTO operation_logs (action, target_type, target_id, note)
+            VALUES ('seed_demo_data', 'activity', ?, '初始化演示活动和基础数据')
+            """,
+            (activity_id,),
+        )
+
+
+if __name__ == "__main__":
+    seed_demo_data(force=True)
+    print("Demo data seeded.")
