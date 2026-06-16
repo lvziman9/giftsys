@@ -379,7 +379,19 @@ AI 解析结果不得直接发布。
 }
 ```
 
-原型版可以先使用规则解析器生成活动和礼物规则 JSON；接入 AI 后，由模型直接输出同一 JSON 结构即可，页面和发布逻辑无需变化。具体 `timeslots` 由系统按活动日期自动生成默认时段，并可在预约管理中继续调整。
+当前实现使用 `services/ai_parser.py` 作为快速配置入口。该入口会优先读取 Google AI Studio API Key 并调用 Gemini，由模型直接输出上述 JSON 结构；如果没有配置 Gemini Key 或调用失败，则继续尝试 OpenAI-compatible 接口；如果仍不可用，则自动回落到 `services/nl_parser.py` 的规则解析器，保证演示流程可用。
+
+AI 快速配置环境变量：
+
+- `GIFTSYS_GEMINI_API_KEY`：Google AI Studio API Key
+- `GIFTSYS_GEMINI_MODEL`：Gemini 模型名称，默认 `gemini-3.5-flash`
+- `GIFTSYS_GEMINI_API_KEY_FILE`：本地 key 文件路径，默认 `.secrets/google_ai_studio_api_key.txt`
+- `GIFTSYS_AI_API_KEY`：OpenAI-compatible API Key，未配置时可使用 `OPENAI_API_KEY`
+- `GIFTSYS_AI_MODEL`：OpenAI-compatible 模型名称，默认 `gpt-4o-mini`
+- `GIFTSYS_AI_BASE_URL`：OpenAI-compatible API 地址，默认 `https://api.openai.com/v1`
+- `GIFTSYS_AI_TIMEOUT_SECONDS`：接口超时时间，默认 15 秒
+
+AI 或规则解析器只生成配置草稿。草稿必须进入人工确认表单，由管理员确认后才能发布活动。具体 `timeslots` 由系统按活动日期自动生成默认时段，并可在预约管理中继续调整。
 
 ### 4.10 员工通知中心
 

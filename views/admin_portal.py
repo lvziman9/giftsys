@@ -57,7 +57,7 @@ from services.activity_service import (
     update_building,
 )
 from services.claim_service import create_claim, redeem_claim_by_code
-from services.nl_parser import parse_activity_text
+from services.ai_parser import parse_activity_text
 
 
 DEFAULT_NL_TEXT = (
@@ -900,8 +900,11 @@ def _render_config_tab(admin: dict[str, Any]) -> None:
 
         if quick_submit:
             _clear_config_widget_state()
-            st.session_state["config_draft"] = parse_activity_text(text)
-            st.rerun()
+            try:
+                st.session_state["config_draft"] = parse_activity_text(text)
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
 
         draft = st.session_state.get("config_draft")
         if draft:

@@ -27,7 +27,8 @@ giftsys/
 │   ├── activity_service.py        # 活动、礼物、资格规则
 │   ├── claim_service.py           # 预约、取消、过期、核销
 │   ├── inventory_service.py       # 库存占用、释放、发放、流水
-│   └── nl_parser.py               # 自然语言配置解析
+│   ├── ai_parser.py               # AI 快速配置解析，支持规则解析兜底
+│   └── nl_parser.py               # 规则解析兜底
 ├── views/
 │   ├── __init__.py
 │   ├── employee_portal.py         # 员工端页面
@@ -340,6 +341,7 @@ giftsys/
 | 2026-06-16 | 新增 | `giftsys_system_flow.md`, `giftsys_prd.md`, `README.md` | 新增系统总体流程文档，按管理端、员工端和系统自动动作描述完整闭环，并补充 Mermaid 泳道式流程图；PRD 和 README 增加流程入口。 |
 | 2026-06-16 | 修改 | `doc/`, `README.md` | 新建 `doc/` 目录并将 PRD、系统总体流程和实施记录迁入；更新 README 和文档内部相对链接。 |
 | 2026-06-16 | 修改 | `doc/giftsys_system_flow.md`, `doc/giftsys_prd.md` | 调整总体流程图：员工登录后可直接进入福利领取，通知中心改为提醒入口；展开预约管理中的时间管理、快捷显示 timeslot、时间段管理、容量管理、联系改期和楼宇管理节点。 |
+| 2026-06-16 | 新增 | `services/ai_parser.py`, `views/admin_portal.py`, `smoke_test.py`, `README.md`, `doc/giftsys_prd.md` | 新增 AI 快速配置解析入口，支持通过 `GIFTSYS_AI_API_KEY` 或 `OPENAI_API_KEY` 调用 OpenAI-compatible 接口生成活动配置 JSON；未配置或调用失败时自动回落到 `nl_parser.py`，保留演示可用性。 |
 
 ## 8. 当前状态
 

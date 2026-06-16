@@ -38,6 +38,7 @@ from services.activity_service import (
     update_time_slot,
 )
 from services.claim_service import cancel_claim, create_claim, redeem_claim_by_code
+from services.ai_parser import parse_activity_text as parse_activity_text_with_ai
 from services.nl_parser import parse_activity_text
 from services.notification_service import (
     count_unread_notifications,
@@ -272,6 +273,15 @@ def main() -> None:
         assert ("技术部", "降噪耳机") in parsed_rules
         assert ("销售部", "500元购物卡") in parsed_rules
         assert ("全员", "零食大礼包") in parsed_rules
+
+        ai_draft = parse_activity_text_with_ai(
+            "2026年端午福利，技术部可选机械键盘或降噪耳机，销售部领取500元购物卡，"
+            "全员可领零食大礼包。A楼分配50%，B楼30%，C楼20%。"
+            "活动日期为6月8日到6月10日。"
+        )
+        assert ai_draft["activity"]["start_date"] == "2026-06-08"
+        assert ai_draft["activity"]["end_date"] == "2026-06-10"
+        assert ai_draft["gift_rules"]
 
         parsed_activity_id = publish_activity_from_config(draft, admin_id=1)
         assert any(

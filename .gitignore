@@ -6,3 +6,4 @@ venv/
 env/
 data/*.db
 data/*.db-*
+.secrets/
