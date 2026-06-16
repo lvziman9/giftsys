@@ -1,3 +1,5 @@
+from datetime import date, timedelta
+
 from seed_data import seed_demo_data
 from services.after_sale_service import (
     create_after_sale,
@@ -11,8 +13,10 @@ from services.activity_service import (
     add_gift_to_activity,
     adjust_activity_inventory,
     authenticate_employee,
+    activity_template_from_history,
     dashboard_summary,
     delete_time_slot,
+    get_activity,
     list_activity_buildings,
     list_activity_gift_rules,
     list_admin_activities,
@@ -22,6 +26,7 @@ from services.activity_service import (
     list_employee_available_activities,
     list_employee_claims,
     list_employees,
+    list_history_activities,
     list_inventory_for_gift,
     list_published_activities,
     list_reschedule_time_slots,
@@ -56,6 +61,14 @@ def _pick(items, predicate, message):
 
 def main() -> None:
     seed_demo_data(force=True)
+    tomorrow = date.today() + timedelta(days=1)
+    parsed_start = tomorrow + timedelta(days=6)
+    parsed_end = parsed_start + timedelta(days=2)
+    parsed_extended_end = parsed_start + timedelta(days=3)
+    parsed_short_end = parsed_start + timedelta(days=1)
+    rule_date = parsed_start + timedelta(days=4)
+    past_start = date.today() - timedelta(days=8)
+    past_end = date.today() - timedelta(days=6)
 
     try:
         employees = list_employees()
@@ -257,7 +270,8 @@ def main() -> None:
             for schedule_slot in day_schedule
             for claim in schedule_slot["claims"]
         )
-        calendar_counts = list_schedule_calendar_counts(2026, 6)
+        slot_day = date.fromisoformat(slot["slot_date"])
+        calendar_counts = list_schedule_calendar_counts(slot_day.year, slot_day.month)
         assert slot["slot_date"] in calendar_counts
 
         draft = parse_activity_text(
@@ -273,6 +287,8 @@ def main() -> None:
         assert ("技术部", "降噪耳机") in parsed_rules
         assert ("销售部", "500元购物卡") in parsed_rules
         assert ("全员", "零食大礼包") in parsed_rules
+        draft["activity"]["start_date"] = parsed_start.isoformat()
+        draft["activity"]["end_date"] = parsed_end.isoformat()
 
         ai_draft = parse_activity_text_with_ai(
             "2026年端午福利，技术部可选机械键盘或降噪耳机，销售部领取500元购物卡，"
@@ -300,8 +316,8 @@ def main() -> None:
             parsed_activity_id,
             name="2026 端午福利更新",
             description="延长一天",
-            start_date="2026-06-08",
-            end_date="2026-06-11",
+            start_date=parsed_start.isoformat(),
+            end_date=parsed_extended_end.isoformat(),
             allow_cancel=True,
             expire_release=True,
             admin_id=1,
@@ -312,8 +328,8 @@ def main() -> None:
             parsed_activity_id,
             name="2026 端午福利更新",
             description="缩短到两天",
-            start_date="2026-06-08",
-            end_date="2026-06-09",
+            start_date=parsed_start.isoformat(),
+            end_date=parsed_short_end.isoformat(),
             allow_cancel=True,
             expire_release=True,
             admin_id=1,
@@ -386,8 +402,8 @@ def main() -> None:
             "保温杯没有可用库存",
         )
         offline_slot = _pick(
-            list_time_slots(parsed_activity_id, offline_inventory["building"]),
-            lambda item: item["remaining"] > 0,
+            list_time_slots_for_admin(parsed_activity_id),
+            lambda item: item["building"] == offline_inventory["building"] and item["remaining"] > 0,
             "下线活动缺少可测试时间段",
         )
         offline_claim = create_claim(
@@ -404,12 +420,105 @@ def main() -> None:
             for item in list_published_activities()
         }
 
+        history_activity_id = publish_activity_from_config(
+            {
+                "activity": {
+                    "name": "历史活动自动归档测试",
+                    "activity_type": "节日福利",
+                    "description": "结束日期早于今天，应自动进入历史活动",
+                    "start_date": past_start.isoformat(),
+                    "end_date": past_end.isoformat(),
+                    "allow_cancel": True,
+                    "expire_release": True,
+                },
+                "gift_rules": [
+                    {
+                        "name": "历史测试礼物",
+                        "department": "技术部",
+                        "total_stock": 9,
+                        "description": "用于验证历史活动",
+                        "building_allocation": {"A楼": 50, "B楼": 30, "C楼": 20, "D楼": 0},
+                        "per_person_limit": 1,
+                    }
+                ],
+            },
+            admin_id=1,
+        )
+        history_activity = get_activity(history_activity_id)
+        assert history_activity["status"] == "ended"
+        assert history_activity_id not in {item["id"] for item in list_admin_activities()}
+        assert history_activity_id not in {item["id"] for item in list_published_activities()}
+        assert any(item["id"] == history_activity_id for item in list_history_activities("历史"))
+        history_gift = list_activity_gift_rules(history_activity_id)[0]
+        history_inventory = _pick(
+            list_inventory_for_gift(history_activity_id, history_gift["id"]),
+            lambda item: item["building"] == "A楼",
+            "缺少历史活动 A楼库存",
+        )
+        history_slot = _pick(
+            list_time_slots_for_admin(history_activity_id),
+            lambda item: item["building"] == "A楼",
+            "缺少历史活动时间段",
+        )
+        ended_claim = create_claim(
+            employee_id=tech["id"],
+            activity_id=history_activity_id,
+            gift_id=history_gift["id"],
+            building=history_inventory["building"],
+            time_slot_id=history_slot["id"],
+        )
+        assert not ended_claim["ok"]
         try:
+            update_activity_basic(
+                history_activity_id,
+                name="不允许修改历史活动",
+                description="历史活动不能修改",
+                start_date=tomorrow.isoformat(),
+                end_date=(tomorrow + timedelta(days=1)).isoformat(),
+                allow_cancel=True,
+                expire_release=True,
+                admin_id=1,
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("不应允许修改历史活动")
+        try:
+            adjust_activity_inventory(
+                history_inventory["id"],
+                adjustment_type="increase",
+                quantity=1,
+                reason="历史活动不能调库存",
+                admin_id=1,
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("不应允许调整历史活动库存")
+        try:
+            set_activity_status(history_activity_id, "published", admin_id=1)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("不应允许恢复已结束活动")
+
+        history_template = activity_template_from_history(history_activity_id)
+        assert history_template["gift_rules"][0]["name"] == "历史测试礼物"
+        republish_start = rule_date + timedelta(days=2)
+        history_template["activity"]["name"] = "历史活动再次发布测试"
+        history_template["activity"]["start_date"] = republish_start.isoformat()
+        history_template["activity"]["end_date"] = republish_start.isoformat()
+        republished_history_id = publish_activity_from_config(history_template, admin_id=1)
+        assert get_activity(republished_history_id)["status"] == "published"
+        assert republished_history_id in {item["id"] for item in list_admin_activities()}
+
+        try:
+            activity_start_plus_one = (date.fromisoformat(activity["start_date"]) + timedelta(days=1)).isoformat()
             update_activity_basic(
                 activity["id"],
                 name=activity["name"],
                 description=activity["description"],
-                start_date="2026-06-09",
+                start_date=activity_start_plus_one,
                 end_date=activity["end_date"],
                 allow_cancel=True,
                 expire_release=True,
@@ -447,8 +556,8 @@ def main() -> None:
                     "name": "规则行配置活动",
                     "activity_type": "节日福利",
                     "description": "测试礼物规则行和楼宇分配",
-                    "start_date": "2026-06-11",
-                    "end_date": "2026-06-11",
+                    "start_date": rule_date.isoformat(),
+                    "end_date": rule_date.isoformat(),
                     "allow_cancel": True,
                     "expire_release": True,
                 },
@@ -477,7 +586,7 @@ def main() -> None:
 
         updated_slots = publish_time_slot(
             activity_id=rule_activity_id,
-            slot_date="2026-06-11",
+            slot_date=rule_date.isoformat(),
             start_time="11:00",
             end_time="12:00",
             capacity=10,

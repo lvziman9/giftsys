@@ -167,6 +167,10 @@ def seed_demo_data(force: bool = False) -> None:
             ("admin", ADMIN_PASSWORD, "行政管理员"),
         )
 
+        first_slot_date = date.today() + timedelta(days=1)
+        activity_start = first_slot_date.isoformat()
+        activity_end = (first_slot_date + timedelta(days=4)).isoformat()
+
         activity_id = conn.execute(
             """
             INSERT INTO activities (
@@ -176,11 +180,11 @@ def seed_demo_data(force: bool = False) -> None:
             VALUES (?, ?, ?, ?, ?, 'published', 1, 1, CURRENT_TIMESTAMP)
             """,
             (
-                "2026 端午福利",
+                f"{first_slot_date.year} 端午福利",
                 "节日福利",
                 "演示用活动：技术部可选键盘或耳机，销售部可领购物卡，全员可领零食礼包。",
-                "2026-06-08",
-                "2026-06-12",
+                activity_start,
+                activity_end,
             ),
         ).lastrowid
 
@@ -231,7 +235,6 @@ def seed_demo_data(force: bool = False) -> None:
                     (activity_id, gift_id, building, qty, qty),
                 )
 
-        first_slot_date = date(2026, 6, 8)
         slot_dates = [(first_slot_date + timedelta(days=offset)).isoformat() for offset in range(5)]
         for building in BUILDINGS:
             for slot_date in slot_dates:

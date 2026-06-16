@@ -26,9 +26,11 @@ from services.activity_service import (
     add_building,
     adjust_activity_inventory,
     authenticate_admin,
+    activity_template_from_history,
     activity_date_options,
     dashboard_summary,
     delete_time_slot,
+    get_activity,
     get_reschedule_context,
     list_activity_buildings,
     list_activity_gift_rules,
@@ -42,6 +44,7 @@ from services.activity_service import (
     list_employee_claims,
     list_employees,
     list_inventory_rows,
+    list_history_activities,
     list_published_activities,
     list_reschedule_time_slots,
     list_schedule_calendar_counts,
@@ -63,7 +66,7 @@ from services.ai_parser import parse_activity_text
 DEFAULT_NL_TEXT = (
     "2026年端午福利，技术部可选机械键盘或降噪耳机，销售部领取500元购物卡，"
     "全员可领零食大礼包。A楼分配50%，B楼30%，C楼20%。"
-    "活动日期为6月8日到6月10日。"
+    "活动日期为6月20日到6月22日。"
 )
 
 LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
@@ -141,7 +144,10 @@ def _render_compact_action_styles() -> None:
             }
             div[data-testid="stDialog"] div[role="dialog"] {
                 margin: auto !important;
-                max-height: min(86vh, 760px);
+                width: min(96vw, 980px);
+                max-height: min(88vh, 820px);
+                overflow-y: auto !important;
+                overscroll-behavior: contain;
             }
             div[data-testid="stDialog"] div[role="dialog"] [data-testid="stForm"] {
                 width: 100%;
@@ -323,6 +329,8 @@ def _render_admin_nav(current_page: str) -> str:
         label_visibility="collapsed",
     )
     selected_key = next(key for key, label in ADMIN_NAV_ITEMS if label == selected_label)
+    if selected_key != current_page:
+        _clear_active_dialog_state()
     st.session_state["admin_page"] = selected_key
     return selected_key
 
@@ -408,17 +416,68 @@ def _default_manual_config() -> dict[str, Any]:
     }
 
 
-def _clear_config_widget_state() -> None:
-    prefixes = (
-        "gift_name_",
-        "gift_department_",
-        "gift_stock_",
-        "gift_description_",
-        "gift_allocation_",
+def _clear_gift_editor_widget_state(*editor_prefixes: str) -> None:
+    prefixes = []
+    for editor_prefix in editor_prefixes:
+        prefixes.extend(
+            (
+                f"{editor_prefix}_gift_name_",
+                f"{editor_prefix}_gift_department_",
+                f"{editor_prefix}_gift_stock_",
+                f"{editor_prefix}_gift_description_",
+                f"{editor_prefix}_gift_allocation_",
+            )
+        )
+    prefixes.extend(
+        (
+            "gift_name_",
+            "gift_department_",
+            "gift_stock_",
+            "gift_description_",
+            "gift_allocation_",
+        )
     )
     for key in list(st.session_state.keys()):
-        if key.startswith(prefixes):
+        if key.startswith(tuple(prefixes)):
             del st.session_state[key]
+
+
+def _clear_config_widget_state() -> None:
+    _clear_gift_editor_widget_state("config")
+
+
+def _clear_activity_config_state() -> None:
+    st.session_state.pop("config_draft", None)
+    st.session_state.pop("quick_config_text", None)
+    _clear_config_widget_state()
+
+
+def _clear_republish_dialog_state() -> None:
+    st.session_state.pop("republish_activity_id", None)
+    st.session_state.pop("republish_template", None)
+    st.session_state.pop("republish_template_source_id", None)
+    _clear_gift_editor_widget_state("republish")
+
+
+def _clear_after_sale_dialog_state() -> None:
+    st.session_state.pop("admin_after_sale_dialog_id", None)
+    for key in list(st.session_state.keys()):
+        if key.startswith("after_sale_dialog_message_"):
+            del st.session_state[key]
+
+
+def _clear_active_dialog_state() -> None:
+    for key in (
+        "pending_activity_status_change",
+        "pending_slot_toggle",
+        "pending_reschedule_claim_id",
+        "show_add_time_slot_dialog",
+        "show_delete_time_slot_dialog",
+    ):
+        st.session_state.pop(key, None)
+    st.session_state.pop("delete_time_slot_dialog_selector", None)
+    _clear_republish_dialog_state()
+    _clear_after_sale_dialog_state()
 
 
 def _ensure_admin() -> dict[str, Any] | None:
@@ -470,6 +529,7 @@ def _activity_status_label(status: str) -> str:
     labels = {
         "published": "已上线",
         "offline": "已下线",
+        "ended": "已结束",
         "draft": "草稿",
     }
     return labels.get(status, status)
@@ -510,6 +570,81 @@ def _gift_rules_from_draft(draft: dict[str, Any], buildings: list[str]) -> list[
             }
         )
     return rules
+
+
+def _render_gift_rules_editor(
+    current_rules: list[dict[str, Any]],
+    buildings: list[str],
+    departments: list[str],
+    key_prefix: str,
+) -> list[dict[str, Any]]:
+    edited_rules = []
+    for index, rule in enumerate(current_rules):
+        cols = st.columns([1.2, 1, 1, 2])
+        with cols[0]:
+            gift_name = st.text_input(
+                "礼物名称",
+                value=rule["name"],
+                key=f"{key_prefix}_gift_name_{index}",
+            )
+        with cols[1]:
+            selected_department = rule.get("department", "全员")
+            department_index = (
+                departments.index(selected_department)
+                if selected_department in departments
+                else 0
+            )
+            department = st.selectbox(
+                "部门",
+                departments,
+                index=department_index,
+                key=f"{key_prefix}_gift_department_{index}",
+            )
+        with cols[2]:
+            total_stock = st.number_input(
+                "初始数量",
+                min_value=1,
+                value=int(rule.get("total_stock", 1)),
+                step=1,
+                key=f"{key_prefix}_gift_stock_{index}",
+            )
+        with cols[3]:
+            gift_description = st.text_input(
+                "描述",
+                value=rule.get("description", ""),
+                key=f"{key_prefix}_gift_description_{index}",
+            )
+
+        allocation = {}
+        if buildings:
+            st.markdown(f"{gift_name or '未命名礼物'} 楼宇分配")
+            allocation_cols = st.columns(len(buildings))
+            for building_index, building in enumerate(buildings):
+                with allocation_cols[building_index]:
+                    allocation[building] = st.slider(
+                        building,
+                        min_value=0,
+                        max_value=100,
+                        value=int(rule.get("building_allocation", {}).get(building, 0)),
+                        step=1,
+                        key=f"{key_prefix}_gift_allocation_{index}_{building}",
+                    )
+            total_allocation = sum(allocation.values())
+            if total_allocation != 100:
+                st.caption(f"当前合计 {total_allocation}%，发布前需调整为 100%。")
+
+        edited_rules.append(
+            {
+                "name": gift_name,
+                "department": department,
+                "total_stock": int(total_stock),
+                "description": gift_description,
+                "building_allocation": allocation,
+                "per_person_limit": 1,
+            }
+        )
+
+    return edited_rules
 
 
 def _request_activity_status_change(activity: dict[str, Any], target_status: str) -> None:
@@ -874,15 +1009,216 @@ def _render_activity_management_section(
     _render_activity_inventory_adjustment_form(selected, admin)
 
 
+def _format_history_metric(value: Any) -> int:
+    return int(value or 0)
+
+
+def _close_republish_dialog() -> None:
+    _clear_republish_dialog_state()
+    st.rerun()
+
+
+def _render_republish_activity_dialog(admin: dict[str, Any]) -> None:
+    activity_id = st.session_state.get("republish_activity_id")
+    if not activity_id:
+        return
+
+    source = get_activity(int(activity_id))
+    tomorrow = date.today() + timedelta(days=1)
+    default_duration = 0
+    if source:
+        try:
+            default_duration = (
+                date.fromisoformat(source["end_date"]) - date.fromisoformat(source["start_date"])
+            ).days
+        except ValueError:
+            default_duration = 0
+    default_end = tomorrow + timedelta(days=max(default_duration, 0))
+
+    if (
+        st.session_state.get("republish_template_source_id") != int(activity_id)
+        or "republish_template" not in st.session_state
+    ):
+        try:
+            template = activity_template_from_history(int(activity_id))
+        except ValueError as exc:
+            st.session_state.pop("republish_activity_id", None)
+            st.error(str(exc))
+            return
+        template["activity"]["start_date"] = tomorrow.isoformat()
+        template["activity"]["end_date"] = default_end.isoformat()
+        st.session_state["republish_template"] = template
+        st.session_state["republish_template_source_id"] = int(activity_id)
+        _clear_gift_editor_widget_state("republish")
+
+    template = st.session_state["republish_template"]
+
+    def dialog_body() -> None:
+        buildings = _building_names()
+        departments = _department_options()
+        activity = template["activity"]
+        st.caption(f"来源活动：{source['name'] if source else activity_id}")
+        with st.form(f"republish_activity_form_{activity_id}"):
+            name = st.text_input("活动名称", value=activity["name"])
+            cols = st.columns(2)
+            with cols[0]:
+                start_date = st.text_input(
+                    "开始日期",
+                    value=activity.get("start_date", tomorrow.isoformat()),
+                    placeholder="yyyy/mm/dd",
+                )
+            with cols[1]:
+                end_date = st.text_input(
+                    "结束日期",
+                    value=activity.get("end_date", default_end.isoformat()),
+                    placeholder="yyyy/mm/dd",
+                )
+            description = st.text_area(
+                "活动描述",
+                value=activity.get("description", ""),
+                height=90,
+            )
+            allow_cancel = st.checkbox(
+                "允许取消预约",
+                value=bool(activity.get("allow_cancel", True)),
+            )
+            expire_release = st.checkbox(
+                "过期释放库存",
+                value=bool(activity.get("expire_release", True)),
+            )
+
+            st.markdown("**礼物规则**")
+            current_rules = _gift_rules_from_draft(template, buildings)
+            edited_rules = _render_gift_rules_editor(
+                current_rules,
+                buildings,
+                departments,
+                "republish",
+            )
+
+            submit_cols = st.columns([1, 1, 4])
+            with submit_cols[0]:
+                add_gift = st.form_submit_button("新增礼物")
+            with submit_cols[1]:
+                submitted = st.form_submit_button("确认发布", type="primary")
+
+        config = {
+            "activity": {
+                "name": name,
+                "activity_type": activity.get("activity_type", "节日福利"),
+                "description": description,
+                "start_date": start_date,
+                "end_date": end_date,
+                "allow_cancel": allow_cancel,
+                "expire_release": expire_release,
+            },
+            "gift_rules": edited_rules,
+        }
+
+        if add_gift:
+            new_rule = _empty_gift()
+            new_rule["department"] = departments[0] if departments else "全员"
+            new_rule["building_allocation"] = _default_allocation(buildings)
+            config["gift_rules"].append(new_rule)
+            st.session_state["republish_template"] = config
+            st.rerun()
+
+        if submitted:
+            try:
+                new_activity_id = publish_activity_from_config(config, admin_id=admin["id"])
+                created = get_activity(new_activity_id)
+                if created and created["status"] == "ended":
+                    st.session_state["history_activity_feedback"] = (
+                        f"结束日期早于今天，活动 ID {new_activity_id} 已保存为历史活动。"
+                    )
+                else:
+                    st.session_state["history_activity_feedback"] = (
+                        f"活动已再次发布，活动 ID：{new_activity_id}"
+                    )
+                _close_republish_dialog()
+            except ValueError as exc:
+                st.error(str(exc))
+
+        if st.button("关闭", key=f"close_republish_activity_dialog_{activity_id}"):
+            _close_republish_dialog()
+
+    _open_dialog("再次发布历史活动", dialog_body, width="large")
+
+
+def _render_activity_history_section(admin: dict[str, Any]) -> None:
+    st.subheader("历史活动")
+    _render_republish_activity_dialog(admin)
+
+    feedback = st.session_state.pop("history_activity_feedback", None)
+    if feedback:
+        st.success(feedback)
+
+    keyword = st.text_input(
+        "搜索历史活动",
+        placeholder="输入活动名称或描述",
+        key="history_activity_search",
+    )
+    activities = list_history_activities(keyword)
+    if not activities:
+        st.caption("暂无历史活动。")
+        return
+
+    for activity in activities:
+        with st.container(border=True):
+            title_cols = st.columns([6, 0.9])
+            with title_cols[0]:
+                st.markdown(f"**{activity['name']}**")
+                st.caption(
+                    f"{activity['start_date']} 至 {activity['end_date']} · "
+                    f"{_activity_status_label(activity['status'])}"
+                )
+            with title_cols[1]:
+                if st.button(
+                    "再次发布",
+                    type="primary",
+                    key=f"republish_activity_{activity['id']}",
+                    use_container_width=True,
+                ):
+                    st.session_state["republish_activity_id"] = int(activity["id"])
+                    st.rerun()
+
+            metric_cols = st.columns(5)
+            metric_cols[0].metric("礼品", _format_history_metric(activity.get("gift_count")))
+            metric_cols[1].metric("库存", _format_history_metric(activity.get("total_stock")))
+            metric_cols[2].metric("发放", _format_history_metric(activity.get("redeemed_stock")))
+            metric_cols[3].metric("剩余", _format_history_metric(activity.get("available_stock")))
+            metric_cols[4].metric("领取员工", _format_history_metric(activity.get("claimed_employee_count")))
+
+            gift_rows = [
+                {
+                    "礼品": gift["name"],
+                    "部门": gift.get("departments", ""),
+                    "库存": gift["inventory_total"],
+                    "发放": gift["redeemed_stock"],
+                    "剩余": gift["available_stock"],
+                    "已预约": gift["reserved_stock"],
+                }
+                for gift in list_activity_gift_rules(activity["id"])
+            ]
+            st.dataframe(gift_rows, use_container_width=True, hide_index=True)
+
+
 def _render_config_tab(admin: dict[str, Any]) -> None:
     buildings = _building_names()
     departments = _department_options()
 
-    config_tab, management_tab = st.tabs(["活动配置", "活动管理"])
+    config_tab, management_tab, history_tab = st.tabs(["活动配置", "活动管理", "历史活动"])
     with config_tab:
         st.subheader("配置活动")
+        config_feedback = st.session_state.pop("activity_config_feedback", None)
+        if config_feedback:
+            if config_feedback.get("type") == "warning":
+                st.warning(config_feedback["message"])
+            else:
+                st.success(config_feedback["message"])
+
         if st.button("配置活动", type="primary"):
-            _clear_config_widget_state()
+            _clear_activity_config_state()
             st.session_state["config_draft"] = _default_manual_config()
             st.rerun()
 
@@ -893,6 +1229,7 @@ def _render_config_tab(admin: dict[str, Any]) -> None:
             height=140,
             placeholder=DEFAULT_NL_TEXT,
             label_visibility="collapsed",
+            key="quick_config_text",
         )
         _, action_col = st.columns([4, 1])
         with action_col:
@@ -920,67 +1257,12 @@ def _render_config_tab(admin: dict[str, Any]) -> None:
 
                 st.markdown("**礼物规则**")
                 current_rules = _gift_rules_from_draft(draft, buildings)
-                edited_rules = []
-                for index, rule in enumerate(current_rules):
-                    cols = st.columns([1.2, 1, 1, 2])
-                    with cols[0]:
-                        gift_name = st.text_input("礼物名称", value=rule["name"], key=f"gift_name_{index}")
-                    with cols[1]:
-                        selected_department = rule.get("department", "全员")
-                        department_index = (
-                            departments.index(selected_department)
-                            if selected_department in departments
-                            else 0
-                        )
-                        department = st.selectbox(
-                            "部门",
-                            departments,
-                            index=department_index,
-                            key=f"gift_department_{index}",
-                        )
-                    with cols[2]:
-                        total_stock = st.number_input(
-                            "初始数量",
-                            min_value=1,
-                            value=int(rule.get("total_stock", 1)),
-                            step=1,
-                            key=f"gift_stock_{index}",
-                        )
-                    with cols[3]:
-                        gift_description = st.text_input(
-                            "描述",
-                            value=rule.get("description", ""),
-                            key=f"gift_description_{index}",
-                        )
-
-                    allocation = {}
-                    if buildings:
-                        st.markdown(f"{gift_name or '未命名礼物'} 楼宇分配")
-                        allocation_cols = st.columns(len(buildings))
-                        for building_index, building in enumerate(buildings):
-                            with allocation_cols[building_index]:
-                                allocation[building] = st.slider(
-                                    building,
-                                    min_value=0,
-                                    max_value=100,
-                                    value=int(rule.get("building_allocation", {}).get(building, 0)),
-                                    step=1,
-                                    key=f"gift_allocation_{index}_{building}",
-                                )
-                        total_allocation = sum(allocation.values())
-                        if total_allocation != 100:
-                            st.caption(f"当前合计 {total_allocation}%，发布前需调整为 100%。")
-
-                    edited_rules.append(
-                        {
-                            "name": gift_name,
-                            "department": department,
-                            "total_stock": int(total_stock),
-                            "description": gift_description,
-                            "building_allocation": allocation,
-                            "per_person_limit": 1,
-                        }
-                    )
+                edited_rules = _render_gift_rules_editor(
+                    current_rules,
+                    buildings,
+                    departments,
+                    "config",
+                )
 
                 add_gift = st.form_submit_button("新增礼物")
 
@@ -1010,13 +1292,26 @@ def _render_config_tab(admin: dict[str, Any]) -> None:
             if submitted:
                 try:
                     activity_id = publish_activity_from_config(config, admin_id=admin["id"])
-                    st.success(f"活动已发布，活动 ID：{activity_id}")
-                    st.session_state.pop("config_draft", None)
+                    created = get_activity(activity_id)
+                    if created and created["status"] == "ended":
+                        st.session_state["activity_config_feedback"] = {
+                            "type": "warning",
+                            "message": f"结束日期早于今天，活动 ID {activity_id} 已自动进入历史活动。",
+                        }
+                    else:
+                        st.session_state["activity_config_feedback"] = {
+                            "type": "success",
+                            "message": f"活动已发布，活动 ID：{activity_id}",
+                        }
+                    _clear_activity_config_state()
+                    st.rerun()
                 except ValueError as exc:
                     st.error(str(exc))
 
     with management_tab:
         _render_activity_management_section(admin, departments)
+    with history_tab:
+        _render_activity_history_section(admin)
 
 
 def _select_activity(key: str, include_offline: bool = True) -> dict[str, Any] | None:
@@ -2155,7 +2450,7 @@ def _request_after_sale_admin_dialog(after_sale_id: int) -> None:
 
 
 def _close_after_sale_admin_dialog() -> None:
-    st.session_state.pop("admin_after_sale_dialog_id", None)
+    _clear_after_sale_dialog_state()
 
 
 def _render_after_sale_rows(rows: list[dict[str, Any]], action_label: str) -> None:
@@ -2228,6 +2523,7 @@ def _render_after_sale_detail(after_sale: dict[str, Any], admin: dict[str, Any])
         key=f"after_sale_inventory_action_{after_sale['id']}",
     )
 
+    message_key = f"after_sale_dialog_message_{after_sale['id']}"
     cols = st.columns(3)
     with cols[0]:
         if st.button(
@@ -2238,11 +2534,11 @@ def _render_after_sale_detail(after_sale: dict[str, Any], admin: dict[str, Any])
         ):
             try:
                 mark_after_sale_processing(after_sale["id"], admin_note, admin_id=admin["id"])
-                st.success("售后单已标记处理中")
+                st.session_state.pop(message_key, None)
                 _close_after_sale_admin_dialog()
                 st.rerun()
             except ValueError as exc:
-                st.error(str(exc))
+                st.session_state[message_key] = str(exc)
     with cols[1]:
         if st.button(
             "完成售后",
@@ -2257,11 +2553,11 @@ def _render_after_sale_detail(after_sale: dict[str, Any], admin: dict[str, Any])
                     admin_note,
                     admin_id=admin["id"],
                 )
-                st.success("售后单已完成")
+                st.session_state.pop(message_key, None)
                 _close_after_sale_admin_dialog()
                 st.rerun()
             except ValueError as exc:
-                st.error(str(exc))
+                st.session_state[message_key] = str(exc)
     with cols[2]:
         if st.button(
             "拒绝售后",
@@ -2270,11 +2566,14 @@ def _render_after_sale_detail(after_sale: dict[str, Any], admin: dict[str, Any])
         ):
             try:
                 reject_after_sale(after_sale["id"], admin_note, admin_id=admin["id"])
-                st.success("售后单已拒绝")
+                st.session_state.pop(message_key, None)
                 _close_after_sale_admin_dialog()
                 st.rerun()
             except ValueError as exc:
-                st.error(str(exc))
+                st.session_state[message_key] = str(exc)
+
+    if st.session_state.get(message_key):
+        st.error(st.session_state[message_key])
 
     if st.button("关闭", key=f"after_sale_close_active_{after_sale['id']}"):
         _close_after_sale_admin_dialog()
@@ -2744,11 +3043,14 @@ def _render_hidden_tool_sidebar() -> None:
     st.sidebar.markdown('<div class="admin-sidebar-spacer"></div>', unsafe_allow_html=True)
     if st.sidebar.button("重新初始化演示数据"):
         seed_demo_data(force=True)
-        st.session_state.pop("config_draft", None)
+        _clear_activity_config_state()
+        _clear_active_dialog_state()
         st.session_state.pop("reservation_test_results", None)
         st.success("演示数据已重置")
         st.rerun()
     if st.sidebar.button("退出管理后台"):
+        _clear_activity_config_state()
+        _clear_active_dialog_state()
         st.session_state.pop("admin", None)
         st.session_state.pop("admin_page", None)
         st.session_state.pop("admin_nav_radio", None)
@@ -2776,10 +3078,13 @@ def render() -> None:
         st.markdown('<div class="admin-sidebar-spacer"></div>', unsafe_allow_html=True)
         if st.button("重新初始化演示数据"):
             seed_demo_data(force=True)
-            st.session_state.pop("config_draft", None)
+            _clear_activity_config_state()
+            _clear_active_dialog_state()
             st.success("演示数据已重置")
             st.rerun()
         if st.button("退出管理后台"):
+            _clear_activity_config_state()
+            _clear_active_dialog_state()
             st.session_state.pop("admin", None)
             st.session_state.pop("admin_page", None)
             st.session_state.pop("admin_nav_radio", None)

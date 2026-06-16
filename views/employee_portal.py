@@ -440,7 +440,7 @@ def _render_claims_section(employee: dict) -> None:
 
 def _render_after_sale_record(after_sale: dict, employee: dict) -> None:
     with st.container(border=True):
-        title_cols = st.columns([4, 1])
+        title_cols = st.columns([6, 0.9])
         with title_cols[0]:
             st.subheader(
                 f"{_format_after_sale_id(after_sale['id'])} · {_after_sale_status_label(after_sale['status'])}"
@@ -450,6 +450,7 @@ def _render_after_sale_record(after_sale: dict, employee: dict) -> None:
                 if st.button(
                     "取消售后",
                     key=f"cancel_after_sale_{after_sale['id']}",
+                    use_container_width=True,
                 ):
                     try:
                         cancel_after_sale(after_sale["id"], employee["id"])

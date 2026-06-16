@@ -10,6 +10,22 @@ from services.inventory_service import write_inventory_log
 from services.notification_service import create_notification, notify_activity_published
 
 
+def auto_end_expired_activities(conn=None) -> None:
+    today = date.today().isoformat()
+    sql = """
+        UPDATE activities
+        SET status = 'ended'
+        WHERE status IN ('published', 'offline')
+          AND end_date < ?
+    """
+    if conn is not None:
+        conn.execute(sql, (today,))
+        return
+
+    with get_connection() as local_conn:
+        local_conn.execute(sql, (today,))
+
+
 def list_employees() -> list[dict[str, Any]]:
     return fetch_all(
         """
@@ -247,6 +263,7 @@ def authenticate_admin(password: str) -> dict[str, Any] | None:
 
 
 def list_published_activities() -> list[dict[str, Any]]:
+    auto_end_expired_activities()
     return fetch_all(
         """
         SELECT *
@@ -258,6 +275,7 @@ def list_published_activities() -> list[dict[str, Any]]:
 
 
 def list_employee_available_activities(employee_id: int) -> list[dict[str, Any]]:
+    auto_end_expired_activities()
     return fetch_all(
         """
         SELECT DISTINCT a.*
@@ -274,6 +292,7 @@ def list_employee_available_activities(employee_id: int) -> list[dict[str, Any]]
 
 
 def list_admin_activities() -> list[dict[str, Any]]:
+    auto_end_expired_activities()
     return fetch_all(
         """
         SELECT
@@ -303,7 +322,68 @@ def list_admin_activities() -> list[dict[str, Any]]:
     )
 
 
+def list_history_activities(keyword: str = "") -> list[dict[str, Any]]:
+    auto_end_expired_activities()
+    search = f"%{keyword.strip()}%"
+    params: tuple[Any, ...] = ()
+    where = "WHERE a.status = 'ended'"
+    if keyword.strip():
+        where += " AND (a.name LIKE ? OR a.description LIKE ?)"
+        params = (search, search)
+
+    return fetch_all(
+        f"""
+        SELECT
+            a.*,
+            (SELECT COUNT(*) FROM gifts g WHERE g.activity_id = a.id) AS gift_count,
+            (
+                SELECT COUNT(*)
+                FROM claims c
+                WHERE c.activity_id = a.id
+                  AND c.status = 'reserved'
+            ) AS reserved_count,
+            (
+                SELECT COUNT(*)
+                FROM claims c
+                WHERE c.activity_id = a.id
+                  AND c.status = 'redeemed'
+            ) AS redeemed_count,
+            (
+                SELECT COUNT(DISTINCT c.employee_id)
+                FROM claims c
+                WHERE c.activity_id = a.id
+                  AND c.status IN ('reserved', 'redeemed')
+            ) AS claimed_employee_count,
+            (
+                SELECT COALESCE(SUM(i.total_stock), 0)
+                FROM inventory i
+                WHERE i.activity_id = a.id
+            ) AS total_stock,
+            (
+                SELECT COALESCE(SUM(i.available_stock), 0)
+                FROM inventory i
+                WHERE i.activity_id = a.id
+            ) AS available_stock,
+            (
+                SELECT COALESCE(SUM(i.reserved_stock), 0)
+                FROM inventory i
+                WHERE i.activity_id = a.id
+            ) AS reserved_stock,
+            (
+                SELECT COALESCE(SUM(i.redeemed_stock), 0)
+                FROM inventory i
+                WHERE i.activity_id = a.id
+            ) AS redeemed_stock
+        FROM activities a
+        {where}
+        ORDER BY a.end_date DESC, a.id DESC
+        """,
+        params,
+    )
+
+
 def get_activity(activity_id: int) -> dict[str, Any] | None:
+    auto_end_expired_activities()
     return fetch_one("SELECT * FROM activities WHERE id = ?", (activity_id,))
 
 
@@ -345,6 +425,34 @@ def activity_date_options(activity: dict[str, Any]) -> list[str]:
     return [item.isoformat() for item in _date_range(activity["start_date"], activity["end_date"])]
 
 
+def _allocation_percentages(weights: dict[str, int], buildings: list[str]) -> dict[str, int]:
+    if not buildings:
+        return {}
+
+    total_weight = sum(max(int(weights.get(building, 0)), 0) for building in buildings)
+    if total_weight <= 0:
+        base = 100 // len(buildings)
+        allocation = {building: base for building in buildings}
+        allocation[buildings[-1]] += 100 - sum(allocation.values())
+        return allocation
+
+    raw = {
+        building: (max(int(weights.get(building, 0)), 0) * 100 / total_weight)
+        for building in buildings
+    }
+    allocation = {building: int(value) for building, value in raw.items()}
+    remainder = 100 - sum(allocation.values())
+    if remainder > 0:
+        ranked = sorted(
+            buildings,
+            key=lambda building: raw[building] - int(raw[building]),
+            reverse=True,
+        )
+        for building in ranked[:remainder]:
+            allocation[building] += 1
+    return allocation
+
+
 def _normalize_date(value: Any, label: str) -> str:
     return _parse_config_date(value, label).isoformat()
 
@@ -369,6 +477,7 @@ def list_eligible_gifts(
     activity_id: int,
     building: str | None = None,
 ) -> list[dict[str, Any]]:
+    auto_end_expired_activities()
     employee = get_employee(employee_id)
     if not employee:
         return []
@@ -420,6 +529,7 @@ def list_eligible_gifts(
 
 
 def list_inventory_for_gift(activity_id: int, gift_id: int) -> list[dict[str, Any]]:
+    auto_end_expired_activities()
     return fetch_all(
         """
         SELECT i.*, g.name AS gift_name
@@ -433,17 +543,22 @@ def list_inventory_for_gift(activity_id: int, gift_id: int) -> list[dict[str, An
 
 
 def list_time_slots(activity_id: int, building: str) -> list[dict[str, Any]]:
+    auto_end_expired_activities()
     return fetch_all(
         """
-        SELECT *,
-               capacity - reserved_count AS remaining
-        FROM time_slots
-        WHERE activity_id = ?
-          AND building = ?
-          AND is_available = 1
+        SELECT
+            t.*,
+            t.capacity - t.reserved_count AS remaining
+        FROM time_slots t
+        JOIN activities a ON a.id = t.activity_id
+        WHERE t.activity_id = ?
+          AND t.building = ?
+          AND t.is_available = 1
+          AND a.status = 'published'
+          AND a.end_date >= ?
         ORDER BY slot_date, start_time
         """,
-        (activity_id, building),
+        (activity_id, building, date.today().isoformat()),
     )
 
 
@@ -451,6 +566,7 @@ def list_time_slots_for_admin(
     activity_id: int | None = None,
     slot_date: str | None = None,
 ) -> list[dict[str, Any]]:
+    auto_end_expired_activities()
     params: list[Any] = []
     where_parts: list[str] = []
     if activity_id:
@@ -478,6 +594,7 @@ def list_time_slots_for_admin(
 
 
 def list_employee_claims(employee_id: int) -> list[dict[str, Any]]:
+    auto_end_expired_activities()
     return fetch_all(
         """
         SELECT
@@ -503,6 +620,7 @@ def list_employee_claims(employee_id: int) -> list[dict[str, Any]]:
 
 
 def list_claims_for_admin(activity_id: int | None = None) -> list[dict[str, Any]]:
+    auto_end_expired_activities()
     params: tuple[Any, ...] = ()
     where = ""
     if activity_id:
@@ -534,6 +652,7 @@ def list_claims_for_admin(activity_id: int | None = None) -> list[dict[str, Any]
 
 
 def list_inventory_rows(activity_id: int | None = None) -> list[dict[str, Any]]:
+    auto_end_expired_activities()
     params: tuple[Any, ...] = ()
     where = ""
     if activity_id:
@@ -558,6 +677,7 @@ def list_inventory_rows(activity_id: int | None = None) -> list[dict[str, Any]]:
 
 
 def dashboard_summary(activity_id: int | None = None) -> dict[str, Any]:
+    auto_end_expired_activities()
     params: tuple[Any, ...] = ()
     claim_where = ""
     inv_where = ""
@@ -600,6 +720,7 @@ def dashboard_summary(activity_id: int | None = None) -> dict[str, Any]:
 
 
 def list_activity_gift_rules(activity_id: int) -> list[dict[str, Any]]:
+    auto_end_expired_activities()
     return fetch_all(
         """
         SELECT
@@ -710,12 +831,15 @@ def update_activity_basic(
     new_dates = set(_date_range(normalized_start, normalized_end))
 
     with get_connection() as conn:
+        auto_end_expired_activities(conn)
         activity = conn.execute(
             "SELECT * FROM activities WHERE id = ?",
             (activity_id,),
         ).fetchone()
         if not activity:
             raise ValueError("活动不存在")
+        if activity["status"] == "ended":
+            raise ValueError("历史活动不能修改，请使用再次发布创建新活动")
 
         old_dates = set(_date_range(activity["start_date"], activity["end_date"]))
         removed_dates = old_dates - new_dates
@@ -753,6 +877,11 @@ def update_activity_basic(
                 _default_time_slots_for_dates(added_dates),
             )
 
+        next_status = (
+            "ended"
+            if _parse_config_date(normalized_end, "结束日期") < date.today()
+            else activity["status"]
+        )
         conn.execute(
             """
             UPDATE activities
@@ -760,6 +889,7 @@ def update_activity_basic(
                 description = ?,
                 start_date = ?,
                 end_date = ?,
+                status = ?,
                 allow_cancel = ?,
                 expire_release = ?
             WHERE id = ?
@@ -769,6 +899,7 @@ def update_activity_basic(
                 _clean_text(description),
                 normalized_start,
                 normalized_end,
+                next_status,
                 1 if allow_cancel else 0,
                 1 if expire_release else 0,
                 activity_id,
@@ -801,12 +932,18 @@ def set_activity_status(
         raise ValueError("活动状态无效")
 
     with get_connection() as conn:
+        auto_end_expired_activities(conn)
         activity = conn.execute(
             "SELECT * FROM activities WHERE id = ?",
             (activity_id,),
         ).fetchone()
         if not activity:
             raise ValueError("活动不存在")
+        if activity["status"] == "ended":
+            raise ValueError("历史活动不能下线或恢复上线，请使用再次发布创建新活动")
+        if status == "published" and _parse_config_date(activity["end_date"], "结束日期") < date.today():
+            conn.execute("UPDATE activities SET status = 'ended' WHERE id = ?", (activity_id,))
+            raise ValueError("活动已超过结束日期，不能恢复上线")
 
         conn.execute(
             """
@@ -840,12 +977,15 @@ def add_gift_to_activity(
     admin_id: int | None = None,
 ) -> int:
     with get_connection() as conn:
+        auto_end_expired_activities(conn)
         activity = conn.execute(
             "SELECT * FROM activities WHERE id = ?",
             (activity_id,),
         ).fetchone()
         if not activity:
             raise ValueError("活动不存在")
+        if activity["status"] == "ended":
+            raise ValueError("历史活动不能增发礼物，请使用再次发布创建新活动")
 
         gift_name = _normalize_name(rule.get("name", ""))
         department = _normalize_department(rule.get("department", ""))
@@ -922,11 +1062,13 @@ def adjust_activity_inventory(
         raise ValueError("调整数量必须大于 0")
 
     with get_connection() as conn:
+        auto_end_expired_activities(conn)
         row = conn.execute(
             """
-            SELECT i.*, g.name AS gift_name
+            SELECT i.*, g.name AS gift_name, a.status AS activity_status
             FROM inventory i
             JOIN gifts g ON g.id = i.gift_id
+            JOIN activities a ON a.id = i.activity_id
             WHERE i.id = ?
             """,
             (inventory_id,),
@@ -934,6 +1076,8 @@ def adjust_activity_inventory(
         before = row_to_dict(row)
         if not before:
             raise ValueError("库存记录不存在")
+        if before["activity_status"] == "ended":
+            raise ValueError("历史活动不能调整库存，请使用再次发布创建新活动")
 
         if adjustment_type == "decrease" and quantity > before["available_stock"]:
             raise ValueError("减少数量不能超过当前可用库存")
@@ -1000,6 +1144,57 @@ def adjust_activity_inventory(
         (inventory_id,),
     )
     return result or {}
+
+
+def activity_template_from_history(activity_id: int) -> dict[str, Any]:
+    auto_end_expired_activities()
+    activity = get_activity(activity_id)
+    if not activity:
+        raise ValueError("活动不存在")
+    if activity["status"] != "ended":
+        raise ValueError("只有历史活动可以作为再次发布模板")
+
+    active_buildings = [building["name"] for building in list_buildings(active_only=True)]
+    gifts = list_activity_gift_rules(activity_id)
+    inventory_rows = list_inventory_rows(activity_id)
+    inventory_by_gift: dict[int, dict[str, int]] = {}
+    for row in inventory_rows:
+        inventory_by_gift.setdefault(row["gift_id"], {})[row["building"]] = int(row["total_stock"] or 0)
+
+    gift_rules: list[dict[str, Any]] = []
+    for gift in gifts:
+        departments = [
+            department.strip()
+            for department in str(gift.get("departments") or "全员").split("、")
+            if department.strip()
+        ]
+        gift_rules.append(
+            {
+                "name": gift["name"],
+                "department": departments[0] if departments else "全员",
+                "total_stock": int(gift.get("inventory_total") or gift.get("total_stock") or 0),
+                "description": gift.get("spec", ""),
+                "building_allocation": _allocation_percentages(
+                    inventory_by_gift.get(gift["id"], {}),
+                    active_buildings,
+                ),
+                "per_person_limit": int(gift.get("per_person_limit") or 1),
+            }
+        )
+
+    return {
+        "activity": {
+            "name": f"{activity['name']} 复用",
+            "activity_type": activity.get("activity_type", "节日福利"),
+            "description": activity.get("description", ""),
+            "start_date": "",
+            "end_date": "",
+            "allow_cancel": bool(activity.get("allow_cancel", True)),
+            "expire_release": bool(activity.get("expire_release", True)),
+        },
+        "gift_rules": gift_rules,
+        "source_activity_id": activity_id,
+    }
 
 
 def _allocate_stock(total_stock: int, allocations: dict[str, int]) -> dict[str, int]:
@@ -1077,6 +1272,7 @@ def publish_activity_from_config(config: dict[str, Any], admin_id: int | None = 
         raise ValueError("至少需要配置一条资格规则")
     if not gift_rules and not allocations:
         raise ValueError("至少需要配置一个楼栋库存分配")
+    initial_status = "ended" if _parse_config_date(end_date, "结束日期") < date.today() else "published"
     with get_connection() as conn:
         active_buildings = _active_building_names(conn)
         activity_id = conn.execute(
@@ -1085,7 +1281,7 @@ def publish_activity_from_config(config: dict[str, Any], admin_id: int | None = 
                 name, activity_type, description, start_date, end_date, status,
                 allow_cancel, expire_release, published_at
             )
-            VALUES (?, ?, ?, ?, ?, 'published', ?, ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             """,
             (
                 activity["name"],
@@ -1093,6 +1289,7 @@ def publish_activity_from_config(config: dict[str, Any], admin_id: int | None = 
                 activity.get("description", ""),
                 start_date,
                 end_date,
+                initial_status,
                 1 if activity.get("allow_cancel", True) else 0,
                 1 if activity.get("expire_release", True) else 0,
             ),
@@ -1160,7 +1357,8 @@ def publish_activity_from_config(config: dict[str, Any], admin_id: int | None = 
                 """,
                 (admin_id, activity_id, "通过礼物规则配置发布活动"),
             )
-            notify_activity_published(conn, activity_id)
+            if initial_status == "published":
+                notify_activity_published(conn, activity_id)
             return activity_id
 
         gift_name_to_id: dict[str, int] = {}
@@ -1228,7 +1426,8 @@ def publish_activity_from_config(config: dict[str, Any], admin_id: int | None = 
             """,
             (admin_id, activity_id, "通过配置确认页发布活动"),
         )
-        notify_activity_published(conn, activity_id)
+        if initial_status == "published":
+            notify_activity_published(conn, activity_id)
 
     return activity_id
 
@@ -1284,12 +1483,15 @@ def publish_time_slot(
         raise ValueError("容量必须大于 0")
 
     with get_connection() as conn:
+        auto_end_expired_activities(conn)
         activity = conn.execute(
             "SELECT * FROM activities WHERE id = ?",
             (activity_id,),
         ).fetchone()
         if not activity:
             raise ValueError("活动不存在")
+        if activity["status"] == "ended":
+            raise ValueError("历史活动不能新增领取时间，请使用再次发布创建新活动")
         allowed_dates = {item.isoformat() for item in _date_range(activity["start_date"], activity["end_date"])}
         if normalized_date not in allowed_dates:
             raise ValueError("领取日期必须在活动日期范围内")
@@ -1358,12 +1560,20 @@ def set_time_slot_availability(
     admin_id: int | None = None,
 ) -> None:
     with get_connection() as conn:
+        auto_end_expired_activities(conn)
         row = conn.execute(
-            "SELECT * FROM time_slots WHERE id = ?",
+            """
+            SELECT t.*, a.status AS activity_status
+            FROM time_slots t
+            JOIN activities a ON a.id = t.activity_id
+            WHERE t.id = ?
+            """,
             (time_slot_id,),
         ).fetchone()
         if not row:
             raise ValueError("时间段不存在")
+        if row["activity_status"] == "ended":
+            raise ValueError("历史活动不能修改领取时间")
         if row["reserved_count"] > 0 and not is_available:
             raise ValueError("该时间段已有预约，不能直接设为不可领取")
 
@@ -1399,12 +1609,20 @@ def update_time_slot(
         raise ValueError("容量必须大于 0")
 
     with get_connection() as conn:
+        auto_end_expired_activities(conn)
         row = conn.execute(
-            "SELECT * FROM time_slots WHERE id = ?",
+            """
+            SELECT t.*, a.status AS activity_status
+            FROM time_slots t
+            JOIN activities a ON a.id = t.activity_id
+            WHERE t.id = ?
+            """,
             (time_slot_id,),
         ).fetchone()
         if not row:
             raise ValueError("时间段不存在")
+        if row["activity_status"] == "ended":
+            raise ValueError("历史活动不能修改领取时间")
         if capacity < row["reserved_count"]:
             raise ValueError("容量不能小于该时间段已预约人数")
         if row["reserved_count"] > 0 and not is_available:
@@ -1430,12 +1648,20 @@ def update_time_slot(
 
 def delete_time_slot(time_slot_id: int, admin_id: int | None = None) -> None:
     with get_connection() as conn:
+        auto_end_expired_activities(conn)
         row = conn.execute(
-            "SELECT * FROM time_slots WHERE id = ?",
+            """
+            SELECT t.*, a.status AS activity_status
+            FROM time_slots t
+            JOIN activities a ON a.id = t.activity_id
+            WHERE t.id = ?
+            """,
             (time_slot_id,),
         ).fetchone()
         if not row:
             raise ValueError("时间段不存在")
+        if row["activity_status"] == "ended":
+            raise ValueError("历史活动不能删除领取时间")
         if row["reserved_count"] > 0:
             raise ValueError("该时间段已有预约，不能删除")
         claim_count = conn.execute(
@@ -1456,6 +1682,7 @@ def delete_time_slot(time_slot_id: int, admin_id: int | None = None) -> None:
 
 
 def list_schedule_calendar_counts(year: int, month: int) -> dict[str, dict[str, int]]:
+    auto_end_expired_activities()
     last_day = monthrange(year, month)[1]
     start = date(year, month, 1).isoformat()
     end = date(year, month, last_day).isoformat()
@@ -1487,6 +1714,7 @@ def list_schedule_calendar_counts(year: int, month: int) -> dict[str, dict[str, 
 
 
 def list_day_schedule(slot_date: str) -> list[dict[str, Any]]:
+    auto_end_expired_activities()
     normalized_date = _normalize_date(slot_date, "领取日期")
     with get_connection() as conn:
         slots = rows_to_dicts(
@@ -1577,6 +1805,7 @@ def list_reschedule_time_slots(
     building: str,
     slot_date: str,
 ) -> list[dict[str, Any]]:
+    auto_end_expired_activities()
     normalized_date = _normalize_date(slot_date, "目标日期")
     return fetch_all(
         """

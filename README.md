@@ -10,6 +10,8 @@
 
 实施记录见：[doc/giftsys_implementation_log.md](./doc/giftsys_implementation_log.md)
 
+Demo示例视频见[Giftflow](https://drive.google.com/file/d/1H6SHutTpcShD28dtoya-GrhT3CXpN08D/view?usp=sharing)
+
 ## 技术栈
 
 - Streamlit

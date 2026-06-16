@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 from config import BLOCKING_CLAIM_STATUSES, STATUS_RESERVED
 from database import fetch_one, get_connection, row_to_dict
+from services.activity_service import auto_end_expired_activities
 from services.inventory_service import (
     redeem_stock,
     release_stock,
@@ -104,6 +106,7 @@ def create_claim(
     conn = get_connection()
     try:
         conn.execute("BEGIN IMMEDIATE")
+        auto_end_expired_activities(conn)
 
         blocking_statuses = ",".join("?" for _ in BLOCKING_CLAIM_STATUSES)
         existing = conn.execute(
@@ -126,9 +129,12 @@ def create_claim(
             raise ValueError("该活动已有最终处理记录，不能重新预约")
 
         activity = conn.execute(
-            "SELECT status FROM activities WHERE id = ?",
+            "SELECT status, end_date FROM activities WHERE id = ?",
             (activity_id,),
         ).fetchone()
+        if activity and activity["end_date"] < date.today().isoformat():
+            conn.execute("UPDATE activities SET status = 'ended' WHERE id = ?", (activity_id,))
+            raise ValueError("活动已结束，不能预约")
         if not activity or activity["status"] != "published":
             raise ValueError("活动当前不可预约")
 

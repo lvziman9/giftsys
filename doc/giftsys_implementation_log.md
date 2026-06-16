@@ -342,6 +342,9 @@ giftsys/
 | 2026-06-16 | 修改 | `doc/`, `README.md` | 新建 `doc/` 目录并将 PRD、系统总体流程和实施记录迁入；更新 README 和文档内部相对链接。 |
 | 2026-06-16 | 修改 | `doc/giftsys_system_flow.md`, `doc/giftsys_prd.md` | 调整总体流程图：员工登录后可直接进入福利领取，通知中心改为提醒入口；展开预约管理中的时间管理、快捷显示 timeslot、时间段管理、容量管理、联系改期和楼宇管理节点。 |
 | 2026-06-16 | 新增 | `services/ai_parser.py`, `views/admin_portal.py`, `smoke_test.py`, `README.md`, `doc/giftsys_prd.md` | 新增 AI 快速配置解析入口，支持通过 `GIFTSYS_AI_API_KEY` 或 `OPENAI_API_KEY` 调用 OpenAI-compatible 接口生成活动配置 JSON；未配置或调用失败时自动回落到 `nl_parser.py`，保留演示可用性。 |
+| 2026-06-16 | 修改 | `services/activity_service.py`, `services/claim_service.py`, `views/admin_portal.py`, `seed_data.py`, `services/ai_parser.py`, `services/nl_parser.py`, `smoke_test.py`, `doc/giftsys_prd.md`, `doc/giftsys_system_flow.md` | 新增活动已结束状态和历史活动管理：结束日期早于今天的活动自动进入历史活动；已下线活动仍可在有效期内维护；历史活动支持搜索、数据展示和“再次发布”模板弹窗；预约、库存、活动编辑和时间段修改均拦截已结束活动；演示种子数据和快速配置默认示例改为当前日期之后。 |
+| 2026-06-16 | 修改 | `views/admin_portal.py`, `views/employee_portal.py`, `doc/giftsys_prd.md` | 调整“取消售后”和“再次发布”按钮到卡片右上角窄列；再次发布弹窗复用活动配置礼物编辑器，支持调整礼物字段、楼宇分配和新增礼物；移除弹窗内重复的“取消”按钮，仅保留关闭入口。 |
+| 2026-06-16 | 修改 | `views/admin_portal.py`, `doc/giftsys_implementation_log.md` | 修复发布后配置草稿和弹窗状态残留：活动配置发布后统一清空草稿、文案和礼物编辑状态；管理端一级菜单切换、重置数据和退出后台时统一清理活动、历史发布、时间段、改期和售后弹窗状态；弹窗增加最大高度和滚动；售后处理错误提示改为按钮组下方全宽展示。 |
 
 ## 8. 当前状态
 
