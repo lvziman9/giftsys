@@ -37,8 +37,11 @@ giftsys/
 │   └── codegen.py                 # 凭证码、二维码等工具
 ├── data/
 │   └── giftflow.db                # 本地 SQLite 数据库，运行后生成
-├── giftsys_prd.md                 # 原型 PRD
-└── giftsys_implementation_log.md  # 本文档
+├── doc/
+│   ├── giftsys_prd.md             # 原型 PRD
+│   ├── giftsys_system_flow.md     # 系统总体流程和流程图
+│   └── giftsys_implementation_log.md  # 本文档
+└── README.md                      # 项目入口说明
 ```
 
 ## 4. 实施步骤
@@ -334,6 +337,8 @@ giftsys/
 | 2026-06-16 | 修改 | `views/admin_portal.py`, `views/employee_portal.py`, `giftsys_prd.md` | 修复日视图点击空白时段导致日期按 UTC 截断而错到前一天的问题；活动发布页改为“活动配置 / 活动管理” tabs；配置活动增加独立标题；时间管理拆为时间段管理和容量管理；下线活动、删除时间段和保存容量按钮调整为小尺寸样式；员工端售后按钮调整到卡片右侧。 |
 | 2026-06-16 | 修改 | `views/admin_portal.py`, `giftsys_prd.md` | 时间段管理中的“新增时间段”和“删除时间段”改为弹窗操作，页面内仅保留并列小按钮；删除弹窗继续限制已有预约的时间段不可删除。 |
 | 2026-06-16 | 修改 | `views/admin_portal.py` | 优化时间段管理弹窗：弹窗居中展示；新增时间段弹窗改为大尺寸并使用两列布局，避免日期、时段和楼宇下拉框内容被截断。 |
+| 2026-06-16 | 新增 | `giftsys_system_flow.md`, `giftsys_prd.md`, `README.md` | 新增系统总体流程文档，按管理端、员工端和系统自动动作描述完整闭环，并补充 Mermaid 泳道式流程图；PRD 和 README 增加流程入口。 |
+| 2026-06-16 | 修改 | `doc/`, `README.md` | 新建 `doc/` 目录并将 PRD、系统总体流程和实施记录迁入；更新 README 和文档内部相对链接。 |
 
 ## 8. 当前状态
 

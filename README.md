@@ -4,9 +4,11 @@
 
 `活动配置 -> 员工预约 -> 生成凭证 -> 管理员核销 -> 售后处理 -> 库存变化 -> 数据统计`
 
-详细需求见：[giftsys_prd.md](./giftsys_prd.md)
+详细需求见：[doc/giftsys_prd.md](./doc/giftsys_prd.md)
 
-实施记录见：[giftsys_implementation_log.md](./giftsys_implementation_log.md)
+系统总体流程见：[doc/giftsys_system_flow.md](./doc/giftsys_system_flow.md)
+
+实施记录见：[doc/giftsys_implementation_log.md](./doc/giftsys_implementation_log.md)
 
 ## 技术栈
 
