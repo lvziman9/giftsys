@@ -46,35 +46,6 @@ python seed_data.py
 
 运行应用时也会自动初始化演示数据；如果数据库中已有活动，则不会重复覆盖。
 
-## AI 快速配置
-
-“文案快速配置”会优先调用 `services/ai_parser.py`。当前支持 Google AI Studio Gemini 和 OpenAI-compatible 两种接口；如果未配置 API Key 或调用失败，系统会自动回落到 `services/nl_parser.py`，保证演示流程可用。
-
-Google AI Studio Key 默认读取本地文件：
-
-```text
-.secrets/google_ai_studio_api_key.txt
-```
-
-该目录已加入 `.gitignore`，不要提交到仓库。
-
-Gemini 可选环境变量：
-
-```bash
-export GIFTSYS_GEMINI_API_KEY="替换为你的 Google AI Studio API Key"
-export GIFTSYS_GEMINI_MODEL="gemini-3.5-flash"
-```
-
-OpenAI-compatible 可选环境变量：
-
-```bash
-export GIFTSYS_AI_API_KEY="替换为你的 API Key"
-export GIFTSYS_AI_MODEL="gpt-4o-mini"
-export GIFTSYS_AI_BASE_URL="https://api.openai.com/v1"
-```
-
-也支持直接使用 `OPENAI_API_KEY`。AI 输出的 JSON 会继续进入人工确认表单，不会直接发布活动。
-
 ## 启动应用
 
 ```bash
@@ -120,6 +91,10 @@ http://localhost:8501/?portal=admin&tool=reservation_test
 - 预约成功后直接展示验证码，方便继续测试核销、改期、售后和数据看板
 
 注意：该入口会真实创建预约记录、占用库存并生成员工通知。测试完可在侧边栏重新初始化演示数据。
+
+## AI 快速配置
+
+“文案快速配置”会优先调用 `services/ai_parser.py`。当前支持 Google AI Studio Gemini 和 OpenAI-compatible 两种接口
 
 ## 快速回归
 
