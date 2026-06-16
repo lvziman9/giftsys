@@ -345,6 +345,7 @@ giftsys/
 | 2026-06-16 | 修改 | `services/activity_service.py`, `services/claim_service.py`, `views/admin_portal.py`, `seed_data.py`, `services/ai_parser.py`, `services/nl_parser.py`, `smoke_test.py`, `doc/giftsys_prd.md`, `doc/giftsys_system_flow.md` | 新增活动已结束状态和历史活动管理：结束日期早于今天的活动自动进入历史活动；已下线活动仍可在有效期内维护；历史活动支持搜索、数据展示和“再次发布”模板弹窗；预约、库存、活动编辑和时间段修改均拦截已结束活动；演示种子数据和快速配置默认示例改为当前日期之后。 |
 | 2026-06-16 | 修改 | `views/admin_portal.py`, `views/employee_portal.py`, `doc/giftsys_prd.md` | 调整“取消售后”和“再次发布”按钮到卡片右上角窄列；再次发布弹窗复用活动配置礼物编辑器，支持调整礼物字段、楼宇分配和新增礼物；移除弹窗内重复的“取消”按钮，仅保留关闭入口。 |
 | 2026-06-16 | 修改 | `views/admin_portal.py`, `doc/giftsys_implementation_log.md` | 修复发布后配置草稿和弹窗状态残留：活动配置发布后统一清空草稿、文案和礼物编辑状态；管理端一级菜单切换、重置数据和退出后台时统一清理活动、历史发布、时间段、改期和售后弹窗状态；弹窗增加最大高度和滚动；售后处理错误提示改为按钮组下方全宽展示。 |
+| 2026-06-17 | 修改 | `doc/giftsys_prd.md` | 重构 PRD：第 4 节改为按员工端、管理端和系统动作组织的功能设计；补充活动、预约、timeslot、改期、售后和库存状态机；将库存、资格、预约管理和售后处理合并进功能设计；新增数据指标与优化闭环；实施计划改为引用实施记录；压缩未来迭代分类，并移除快速配置回落到规则解析的表述。 |
 
 ## 8. 当前状态
 
