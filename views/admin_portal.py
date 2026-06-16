@@ -4,11 +4,23 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 from html import escape
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 
 from config import CLAIM_STATUS_LABELS, DEFAULT_SLOT_CAPACITY, DEFAULT_TIME_RANGES
 from seed_data import seed_demo_data
+from services.after_sale_service import (
+    AFTER_SALE_EXPECTED_RESOLUTIONS,
+    AFTER_SALE_INVENTORY_ACTIONS,
+    AFTER_SALE_ISSUE_TYPES,
+    AFTER_SALE_STATUS_LABELS,
+    get_after_sale,
+    list_after_sales_for_admin,
+    mark_after_sale_processing,
+    reject_after_sale,
+    resolve_after_sale,
+)
 from services.activity_service import (
     add_gift_to_activity,
     add_building,
@@ -25,10 +37,15 @@ from services.activity_service import (
     list_claims_for_admin,
     list_day_schedule,
     list_departments,
+    list_eligible_gifts,
+    list_employee_available_activities,
+    list_employee_claims,
+    list_employees,
     list_inventory_rows,
     list_published_activities,
     list_reschedule_time_slots,
     list_schedule_calendar_counts,
+    list_time_slots,
     list_time_slots_for_admin,
     publish_activity_from_config,
     publish_time_slot,
@@ -39,7 +56,7 @@ from services.activity_service import (
     update_time_slot,
     update_building,
 )
-from services.claim_service import redeem_claim_by_code
+from services.claim_service import create_claim, redeem_claim_by_code
 from services.nl_parser import parse_activity_text
 
 
@@ -48,6 +65,8 @@ DEFAULT_NL_TEXT = (
     "全员可领零食大礼包。A楼分配50%，B楼30%，C楼20%。"
     "活动日期为6月8日到6月10日。"
 )
+
+LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
 def _slot_time_label(item: dict[str, Any]) -> str:
@@ -73,18 +92,73 @@ def _streamlit_calendar():
     return calendar
 
 
+def _open_dialog(title: str, body, width: str = "small") -> None:
+    dialog = getattr(st, "dialog", None)
+    if not dialog:
+        with st.container(border=True):
+            st.markdown(f"**{title}**")
+            body()
+        return
+
+    try:
+        dialog(title, width=width)(body)()
+    except TypeError:
+        dialog(title)(body)()
+
+
+def _render_compact_action_styles() -> None:
+    st.markdown(
+        """
+        <style>
+            .st-key-offline_activity_button button,
+            .st-key-time_slot_delete_toggle button,
+            .st-key-time_slot_delete_dialog_confirm button {
+                min-height: 32px;
+                padding: 0.25rem 0.75rem;
+                background: #fff !important;
+                border-color: #fecdd3 !important;
+            }
+            .st-key-offline_activity_button button p,
+            .st-key-time_slot_delete_toggle button p,
+            .st-key-time_slot_delete_dialog_confirm button p {
+                color: #ff4b4b !important;
+                font-size: 0.86rem;
+                font-weight: 700;
+            }
+            .st-key-time_slot_add_toggle button,
+            .st-key-save_slot_capacity button {
+                min-height: 32px;
+                padding: 0.25rem 0.75rem;
+            }
+            .st-key-time_slot_add_toggle button p,
+            .st-key-save_slot_capacity button p {
+                font-size: 0.86rem;
+                font-weight: 700;
+            }
+            div[data-testid="stDialog"] {
+                align-items: center !important;
+                justify-content: center !important;
+            }
+            div[data-testid="stDialog"] div[role="dialog"] {
+                margin: auto !important;
+                max-height: min(86vh, 760px);
+            }
+            div[data-testid="stDialog"] div[role="dialog"] [data-testid="stForm"] {
+                width: 100%;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 ADMIN_NAV_ITEMS = [
     ("config", "活动发布"),
     ("publish", "预约管理"),
     ("redeem", "预约核销"),
+    ("after_sale", "售后处理"),
     ("dashboard", "数据看板"),
 ]
-
-PUBLISH_SECTIONS = [
-    ("building", "楼宇视图"),
-    ("schedule", "领取时间管理"),
-]
-
 
 def _current_admin_page() -> str:
     page = st.session_state.get("admin_page", "config")
@@ -95,13 +169,11 @@ def _current_admin_page() -> str:
     return page
 
 
-def _current_publish_section() -> str:
-    section = st.session_state.get("publish_section", "building")
-    allowed = {key for key, _ in PUBLISH_SECTIONS}
-    if section not in allowed:
-        section = "building"
-        st.session_state["publish_section"] = section
-    return section
+def _current_admin_tool() -> str | None:
+    tool = st.query_params.get("tool")
+    if isinstance(tool, list):
+        tool = tool[0] if tool else None
+    return tool if tool == "reservation_test" else None
 
 
 def _render_admin_nav(current_page: str) -> str:
@@ -252,29 +324,6 @@ def _render_admin_nav(current_page: str) -> str:
     )
     selected_key = next(key for key, label in ADMIN_NAV_ITEMS if label == selected_label)
     st.session_state["admin_page"] = selected_key
-    if selected_key == "publish" and "publish_section" not in st.session_state:
-        st.session_state["publish_section"] = "building"
-    return selected_key
-
-
-def _render_publish_subnav(current_section: str) -> str:
-    labels = [label for _, label in PUBLISH_SECTIONS]
-    if st.session_state.get("publish_section_radio") not in labels:
-        st.session_state.pop("publish_section_radio", None)
-    current_index = next(
-        (index for index, (key, _) in enumerate(PUBLISH_SECTIONS) if key == current_section),
-        0,
-    )
-    selected_label = st.radio(
-        "预约管理",
-        labels,
-        index=current_index,
-        key="publish_section_radio",
-        horizontal=True,
-        label_visibility="collapsed",
-    )
-    selected_key = next(key for key, label in PUBLISH_SECTIONS if label == selected_label)
-    st.session_state["publish_section"] = selected_key
     return selected_key
 
 
@@ -424,6 +473,26 @@ def _activity_status_label(status: str) -> str:
         "draft": "草稿",
     }
     return labels.get(status, status)
+
+
+def _after_sale_status_label(status: str) -> str:
+    return AFTER_SALE_STATUS_LABELS.get(status, status)
+
+
+def _after_sale_issue_label(issue_type: str) -> str:
+    return AFTER_SALE_ISSUE_TYPES.get(issue_type, issue_type)
+
+
+def _after_sale_resolution_label(resolution: str) -> str:
+    return AFTER_SALE_EXPECTED_RESOLUTIONS.get(resolution, resolution)
+
+
+def _after_sale_inventory_action_label(action: str) -> str:
+    return AFTER_SALE_INVENTORY_ACTIONS.get(action, action)
+
+
+def _format_after_sale_id(after_sale_id: int) -> str:
+    return f"AS-{after_sale_id:05d}"
 
 
 def _gift_rules_from_draft(draft: dict[str, Any], buildings: list[str]) -> list[dict[str, Any]]:
@@ -786,13 +855,13 @@ def _render_activity_management_section(
 
     _render_activity_edit_form(selected, admin)
 
-    status_cols = st.columns([1, 4])
+    status_cols = st.columns([0.75, 4.25])
     with status_cols[0]:
         if selected["status"] == "published":
-            if st.button("下线活动", use_container_width=True):
+            if st.button("下线活动", use_container_width=True, key="offline_activity_button"):
                 _request_activity_status_change(selected, "offline")
         else:
-            if st.button("恢复上线", type="primary", use_container_width=True):
+            if st.button("恢复上线", type="primary", use_container_width=True, key="online_activity_button"):
                 _request_activity_status_change(selected, "published")
 
     _render_activity_details(selected)
@@ -809,135 +878,142 @@ def _render_config_tab(admin: dict[str, Any]) -> None:
     buildings = _building_names()
     departments = _department_options()
 
-    if st.button("配置活动", type="primary"):
-        _clear_config_widget_state()
-        st.session_state["config_draft"] = _default_manual_config()
-        st.rerun()
-
-    st.markdown("或者复制文字进行快速配置")
-    text = st.text_area(
-        "活动规则文案",
-        value="",
-        height=140,
-        placeholder=DEFAULT_NL_TEXT,
-        label_visibility="collapsed",
-    )
-    _, action_col = st.columns([4, 1])
-    with action_col:
-        quick_submit = st.button("文案快速配置", use_container_width=True)
-
-    if quick_submit:
-        _clear_config_widget_state()
-        st.session_state["config_draft"] = parse_activity_text(text)
-        st.rerun()
-
-    draft = st.session_state.get("config_draft")
-    if draft:
-        st.subheader("配置详情")
-        with st.form("publish_config_form"):
-            activity = draft["activity"]
-            name = st.text_input("活动名称", value=activity["name"])
-            start_date = st.text_input("开始日期", value=activity["start_date"], placeholder="yyyy/mm/dd")
-            end_date = st.text_input("结束日期", value=activity["end_date"], placeholder="yyyy/mm/dd")
-            description = st.text_area("活动描述", value=activity.get("description", ""), height=90)
-            allow_cancel = st.checkbox("允许取消预约", value=activity.get("allow_cancel", True))
-            expire_release = st.checkbox("过期释放库存", value=activity.get("expire_release", True))
-
-            st.markdown("**礼物规则**")
-            current_rules = _gift_rules_from_draft(draft, buildings)
-            edited_rules = []
-            for index, rule in enumerate(current_rules):
-                cols = st.columns([1.2, 1, 1, 2])
-                with cols[0]:
-                    gift_name = st.text_input("礼物名称", value=rule["name"], key=f"gift_name_{index}")
-                with cols[1]:
-                    selected_department = rule.get("department", "全员")
-                    department_index = departments.index(selected_department) if selected_department in departments else 0
-                    department = st.selectbox(
-                        "部门",
-                        departments,
-                        index=department_index,
-                        key=f"gift_department_{index}",
-                    )
-                with cols[2]:
-                    total_stock = st.number_input(
-                        "初始数量",
-                        min_value=1,
-                        value=int(rule.get("total_stock", 1)),
-                        step=1,
-                        key=f"gift_stock_{index}",
-                    )
-                with cols[3]:
-                    gift_description = st.text_input(
-                        "描述",
-                        value=rule.get("description", ""),
-                        key=f"gift_description_{index}",
-                    )
-
-                allocation = {}
-                if buildings:
-                    st.markdown(f"{gift_name or '未命名礼物'} 楼宇分配")
-                    allocation_cols = st.columns(len(buildings))
-                    for building_index, building in enumerate(buildings):
-                        with allocation_cols[building_index]:
-                            allocation[building] = st.slider(
-                                building,
-                                min_value=0,
-                                max_value=100,
-                                value=int(rule.get("building_allocation", {}).get(building, 0)),
-                                step=1,
-                                key=f"gift_allocation_{index}_{building}",
-                            )
-                    total_allocation = sum(allocation.values())
-                    if total_allocation != 100:
-                        st.caption(f"当前合计 {total_allocation}%，发布前需调整为 100%。")
-
-                edited_rules.append(
-                    {
-                        "name": gift_name,
-                        "department": department,
-                        "total_stock": int(total_stock),
-                        "description": gift_description,
-                        "building_allocation": allocation,
-                        "per_person_limit": 1,
-                    }
-                )
-
-            add_gift = st.form_submit_button("新增礼物")
-
-            submitted = st.form_submit_button("确认发布活动", type="primary")
-
-        config = {
-            "activity": {
-                "name": name,
-                "activity_type": "节日福利",
-                "description": description,
-                "start_date": start_date,
-                "end_date": end_date,
-                "allow_cancel": allow_cancel,
-                "expire_release": expire_release,
-            },
-            "gift_rules": edited_rules,
-        }
-
-        if add_gift:
-            new_rule = _empty_gift()
-            new_rule["department"] = departments[0] if departments else "全员"
-            new_rule["building_allocation"] = _default_allocation(buildings)
-            config["gift_rules"].append(new_rule)
-            st.session_state["config_draft"] = config
+    config_tab, management_tab = st.tabs(["活动配置", "活动管理"])
+    with config_tab:
+        st.subheader("配置活动")
+        if st.button("配置活动", type="primary"):
+            _clear_config_widget_state()
+            st.session_state["config_draft"] = _default_manual_config()
             st.rerun()
 
-        if submitted:
-            try:
-                activity_id = publish_activity_from_config(config, admin_id=admin["id"])
-                st.success(f"活动已发布，活动 ID：{activity_id}")
-                st.session_state.pop("config_draft", None)
-            except ValueError as exc:
-                st.error(str(exc))
+        st.markdown("或者复制文字进行快速配置")
+        text = st.text_area(
+            "活动规则文案",
+            value="",
+            height=140,
+            placeholder=DEFAULT_NL_TEXT,
+            label_visibility="collapsed",
+        )
+        _, action_col = st.columns([4, 1])
+        with action_col:
+            quick_submit = st.button("文案快速配置", use_container_width=True)
 
-    st.divider()
-    _render_activity_management_section(admin, departments)
+        if quick_submit:
+            _clear_config_widget_state()
+            st.session_state["config_draft"] = parse_activity_text(text)
+            st.rerun()
+
+        draft = st.session_state.get("config_draft")
+        if draft:
+            st.subheader("配置详情")
+            with st.form("publish_config_form"):
+                activity = draft["activity"]
+                name = st.text_input("活动名称", value=activity["name"])
+                start_date = st.text_input("开始日期", value=activity["start_date"], placeholder="yyyy/mm/dd")
+                end_date = st.text_input("结束日期", value=activity["end_date"], placeholder="yyyy/mm/dd")
+                description = st.text_area("活动描述", value=activity.get("description", ""), height=90)
+                allow_cancel = st.checkbox("允许取消预约", value=activity.get("allow_cancel", True))
+                expire_release = st.checkbox("过期释放库存", value=activity.get("expire_release", True))
+
+                st.markdown("**礼物规则**")
+                current_rules = _gift_rules_from_draft(draft, buildings)
+                edited_rules = []
+                for index, rule in enumerate(current_rules):
+                    cols = st.columns([1.2, 1, 1, 2])
+                    with cols[0]:
+                        gift_name = st.text_input("礼物名称", value=rule["name"], key=f"gift_name_{index}")
+                    with cols[1]:
+                        selected_department = rule.get("department", "全员")
+                        department_index = (
+                            departments.index(selected_department)
+                            if selected_department in departments
+                            else 0
+                        )
+                        department = st.selectbox(
+                            "部门",
+                            departments,
+                            index=department_index,
+                            key=f"gift_department_{index}",
+                        )
+                    with cols[2]:
+                        total_stock = st.number_input(
+                            "初始数量",
+                            min_value=1,
+                            value=int(rule.get("total_stock", 1)),
+                            step=1,
+                            key=f"gift_stock_{index}",
+                        )
+                    with cols[3]:
+                        gift_description = st.text_input(
+                            "描述",
+                            value=rule.get("description", ""),
+                            key=f"gift_description_{index}",
+                        )
+
+                    allocation = {}
+                    if buildings:
+                        st.markdown(f"{gift_name or '未命名礼物'} 楼宇分配")
+                        allocation_cols = st.columns(len(buildings))
+                        for building_index, building in enumerate(buildings):
+                            with allocation_cols[building_index]:
+                                allocation[building] = st.slider(
+                                    building,
+                                    min_value=0,
+                                    max_value=100,
+                                    value=int(rule.get("building_allocation", {}).get(building, 0)),
+                                    step=1,
+                                    key=f"gift_allocation_{index}_{building}",
+                                )
+                        total_allocation = sum(allocation.values())
+                        if total_allocation != 100:
+                            st.caption(f"当前合计 {total_allocation}%，发布前需调整为 100%。")
+
+                    edited_rules.append(
+                        {
+                            "name": gift_name,
+                            "department": department,
+                            "total_stock": int(total_stock),
+                            "description": gift_description,
+                            "building_allocation": allocation,
+                            "per_person_limit": 1,
+                        }
+                    )
+
+                add_gift = st.form_submit_button("新增礼物")
+
+                submitted = st.form_submit_button("确认发布活动", type="primary")
+
+            config = {
+                "activity": {
+                    "name": name,
+                    "activity_type": "节日福利",
+                    "description": description,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "allow_cancel": allow_cancel,
+                    "expire_release": expire_release,
+                },
+                "gift_rules": edited_rules,
+            }
+
+            if add_gift:
+                new_rule = _empty_gift()
+                new_rule["department"] = departments[0] if departments else "全员"
+                new_rule["building_allocation"] = _default_allocation(buildings)
+                config["gift_rules"].append(new_rule)
+                st.session_state["config_draft"] = config
+                st.rerun()
+
+            if submitted:
+                try:
+                    activity_id = publish_activity_from_config(config, admin_id=admin["id"])
+                    st.success(f"活动已发布，活动 ID：{activity_id}")
+                    st.session_state.pop("config_draft", None)
+                except ValueError as exc:
+                    st.error(str(exc))
+
+    with management_tab:
+        _render_activity_management_section(admin, departments)
 
 
 def _select_activity(key: str, include_offline: bool = True) -> dict[str, Any] | None:
@@ -1285,8 +1361,133 @@ def _render_reschedule_sms_dialog(admin: dict[str, Any]) -> None:
             dialog_body()
 
 
+def _close_add_time_slot_dialog() -> None:
+    st.session_state.pop("show_add_time_slot_dialog", None)
+
+
+def _close_delete_time_slot_dialog() -> None:
+    st.session_state.pop("show_delete_time_slot_dialog", None)
+
+
+def _render_add_time_slot_dialog(
+    admin: dict[str, Any],
+    activity: dict[str, Any],
+    date_options: list[str],
+    selected_date: str,
+    building_options: list[str],
+) -> None:
+    if not st.session_state.get("show_add_time_slot_dialog", False):
+        return
+
+    def dialog_body() -> None:
+        st.caption(f"当前活动：{activity['name']}")
+        with st.form("publish_time_slot_dialog_form"):
+            cols = st.columns(2)
+            with cols[0]:
+                slot_date = st.selectbox(
+                    "领取日期",
+                    date_options,
+                    index=date_options.index(selected_date) if selected_date in date_options else 0,
+                )
+            with cols[1]:
+                slot_range = st.selectbox("领取时段", _time_range_options())
+
+            cols = st.columns(2)
+            with cols[0]:
+                building = st.selectbox("楼宇", building_options)
+            with cols[1]:
+                capacity = st.number_input(
+                    "容量",
+                    min_value=1,
+                    value=DEFAULT_SLOT_CAPACITY,
+                    step=1,
+                )
+            submitted = st.form_submit_button("发布 / 更新领取时间", type="primary")
+
+        if submitted:
+            start_time, end_time = _split_time_range(slot_range)
+            try:
+                count = publish_time_slot(
+                    activity_id=activity["id"],
+                    slot_date=slot_date,
+                    start_time=start_time,
+                    end_time=end_time,
+                    capacity=int(capacity),
+                    building=None if building == "全部楼宇" else building,
+                    admin_id=admin["id"],
+                )
+                st.success(f"已发布 {count} 条领取时间")
+                _close_add_time_slot_dialog()
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+        if st.button("关闭", key="close_add_time_slot_dialog"):
+            _close_add_time_slot_dialog()
+            st.rerun()
+
+    _open_dialog("新增时间段", dialog_body, width="large")
+
+
+def _render_delete_time_slot_dialog(
+    admin: dict[str, Any],
+    slots: list[dict[str, Any]],
+) -> None:
+    if not st.session_state.get("show_delete_time_slot_dialog", False):
+        return
+
+    def dialog_body() -> None:
+        if not slots:
+            st.caption("当前日期暂无可删除时间段。")
+            if st.button("关闭", key="close_empty_delete_time_slot_dialog"):
+                _close_delete_time_slot_dialog()
+                st.rerun()
+            return
+
+        current_delete_slot = st.session_state.get("delete_time_slot_dialog_selector")
+        if isinstance(current_delete_slot, dict) and all(
+            slot["id"] != current_delete_slot.get("id") for slot in slots
+        ):
+            st.session_state.pop("delete_time_slot_dialog_selector", None)
+
+        delete_slot = st.selectbox(
+            "选择要删除的时间段",
+            slots,
+            format_func=lambda item: (
+                f"{item['building']} {item['slot_date']} "
+                f"{_slot_time_label(item)} "
+                f"{'可领取' if item['is_available'] else '不可领取'}"
+            ),
+            key="delete_time_slot_dialog_selector",
+        )
+        if delete_slot["reserved_count"] > 0:
+            st.caption("该时间段已有预约，不能删除。")
+
+        cols = st.columns(2)
+        with cols[0]:
+            if st.button(
+                "删除时间段",
+                disabled=delete_slot["reserved_count"] > 0,
+                key="time_slot_delete_dialog_confirm",
+                use_container_width=True,
+            ):
+                try:
+                    delete_time_slot(delete_slot["id"], admin_id=admin["id"])
+                    st.success("领取时间已删除")
+                    _close_delete_time_slot_dialog()
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+        with cols[1]:
+            if st.button("关闭", key="close_delete_time_slot_dialog", use_container_width=True):
+                _close_delete_time_slot_dialog()
+                st.rerun()
+
+    _open_dialog("删除时间段", dialog_body, width="medium")
+
+
 def _render_time_editor(admin: dict[str, Any]) -> None:
-    st.subheader("时间修改")
+    st.subheader("时间段管理")
     activity = _select_activity("time_activity_selector")
     if not activity:
         return
@@ -1306,54 +1507,32 @@ def _render_time_editor(admin: dict[str, Any]) -> None:
             st.session_state.pop("time_slot_filter_date", None)
 
     selected_date = st.selectbox("查看日期", date_options, key="time_slot_filter_date")
-    _, action_col = st.columns([4, 1])
-    with action_col:
-        if st.button("新增时间段", type="primary", use_container_width=True):
-            st.session_state["show_add_time_slot_form"] = not st.session_state.get(
-                "show_add_time_slot_form",
-                False,
-            )
-
-    if st.session_state.get("show_add_time_slot_form", False):
-        with st.form("publish_time_slot_form"):
-            cols = st.columns([1, 1, 1, 1])
-            with cols[0]:
-                slot_date = st.selectbox(
-                    "领取日期",
-                    date_options,
-                    index=date_options.index(selected_date) if selected_date in date_options else 0,
-                )
-            with cols[1]:
-                slot_range = st.selectbox("领取时段", _time_range_options())
-            with cols[2]:
-                capacity = st.number_input(
-                    "容量",
-                    min_value=1,
-                    value=DEFAULT_SLOT_CAPACITY,
-                    step=1,
-                )
-            with cols[3]:
-                building = st.selectbox("楼宇", building_options)
-            submitted = st.form_submit_button("发布 / 更新领取时间", type="primary")
-
-        if submitted:
-            start_time, end_time = _split_time_range(slot_range)
-            try:
-                count = publish_time_slot(
-                    activity_id=activity["id"],
-                    slot_date=slot_date,
-                    start_time=start_time,
-                    end_time=end_time,
-                    capacity=int(capacity),
-                    building=None if building == "全部楼宇" else building,
-                    admin_id=admin["id"],
-                )
-                st.success(f"已发布 {count} 条领取时间")
-                st.rerun()
-            except ValueError as exc:
-                st.error(str(exc))
-
     slots = list_time_slots_for_admin(activity["id"], selected_date)
+
+    action_cols = st.columns([0.75, 0.75, 4.5])
+    with action_cols[0]:
+        if st.button(
+            "新增时间段",
+            type="primary",
+            key="time_slot_add_toggle",
+            use_container_width=True,
+        ):
+            st.session_state["show_add_time_slot_dialog"] = True
+            st.session_state["show_delete_time_slot_dialog"] = False
+            st.rerun()
+    with action_cols[1]:
+        if st.button(
+            "删除时间段",
+            key="time_slot_delete_toggle",
+            use_container_width=True,
+        ):
+            st.session_state["show_delete_time_slot_dialog"] = True
+            st.session_state["show_add_time_slot_dialog"] = False
+            st.rerun()
+
+    _render_add_time_slot_dialog(admin, activity, date_options, selected_date, building_options)
+    _render_delete_time_slot_dialog(admin, slots)
+
     if not slots:
         st.caption("当日暂无领取时间。")
         return
@@ -1372,21 +1551,21 @@ def _render_time_editor(admin: dict[str, Any]) -> None:
     ]
     st.dataframe(table, use_container_width=True, hide_index=True)
 
-    st.markdown("**容量和删除**")
-    current_slot = st.session_state.get("time_slot_status_selector")
+    st.markdown("**容量管理**")
+    current_slot = st.session_state.get("capacity_time_slot_selector")
     if isinstance(current_slot, dict) and all(slot["id"] != current_slot.get("id") for slot in slots):
-        st.session_state.pop("time_slot_status_selector", None)
+        st.session_state.pop("capacity_time_slot_selector", None)
     slot = st.selectbox(
-        "选择要调整容量或删除的时间",
+        "选择要调整容量的时间段",
         slots,
         format_func=lambda item: (
             f"{item['building']} {item['slot_date']} "
             f"{_slot_time_label(item)} "
             f"{'可领取' if item['is_available'] else '不可领取'}"
         ),
-        key="time_slot_status_selector",
+        key="capacity_time_slot_selector",
     )
-    cols = st.columns([1, 1, 1, 1])
+    cols = st.columns([1, 0.75, 3.75])
     with cols[0]:
         new_capacity = st.number_input(
             "修改容量",
@@ -1398,7 +1577,12 @@ def _render_time_editor(admin: dict[str, Any]) -> None:
     with cols[1]:
         st.write("")
         st.write("")
-        if st.button("保存容量", type="primary", use_container_width=True):
+        if st.button(
+            "保存容量",
+            type="primary",
+            key="save_slot_capacity",
+            use_container_width=True,
+        ):
             try:
                 update_time_slot(
                     time_slot_id=slot["id"],
@@ -1407,16 +1591,6 @@ def _render_time_editor(admin: dict[str, Any]) -> None:
                     admin_id=admin["id"],
                 )
                 st.success("容量已更新")
-                st.rerun()
-            except ValueError as exc:
-                st.error(str(exc))
-    with cols[2]:
-        st.write("")
-        st.write("")
-        if st.button("删除时间段", disabled=slot["reserved_count"] > 0, use_container_width=True):
-            try:
-                delete_time_slot(slot["id"], admin_id=admin["id"])
-                st.success("领取时间已删除")
                 st.rerun()
             except ValueError as exc:
                 st.error(str(exc))
@@ -1698,31 +1872,60 @@ def _day_calendar_events(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return events
 
 
+def _calendar_state_date(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value.astimezone(LOCAL_TIMEZONE) if value.tzinfo else value
+        return parsed.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+
+    raw = str(value).strip()
+    if not raw:
+        return None
+    if "T" not in raw:
+        parsed_date = _parse_date_value(raw[:10])
+        return parsed_date.isoformat() if parsed_date else None
+
+    normalized = raw.replace("Z", "+00:00")
+    try:
+        parsed_datetime = datetime.fromisoformat(normalized)
+    except ValueError:
+        parsed_date = _parse_date_value(raw[:10])
+        return parsed_date.isoformat() if parsed_date else None
+
+    if parsed_datetime.tzinfo:
+        parsed_datetime = parsed_datetime.astimezone(LOCAL_TIMEZONE)
+    return parsed_datetime.date().isoformat()
+
+
 def _date_from_calendar_state(state: Any, current_view: str) -> str | None:
     if not isinstance(state, dict):
         return None
 
-    date_click = state.get("dateClick")
-    if isinstance(date_click, dict):
-        value = date_click.get("dateStr") or date_click.get("date")
-        if value:
-            return str(value)[:10]
+    if current_view != "日视图":
+        date_click = state.get("dateClick")
+        if isinstance(date_click, dict):
+            value = date_click.get("dateStr") or date_click.get("date")
+            if value:
+                return _calendar_state_date(value)
 
-    event_click = state.get("eventClick")
-    if isinstance(event_click, dict):
-        event = event_click.get("event") if isinstance(event_click.get("event"), dict) else event_click
-        event_id = str(event.get("id", ""))
-        if event_id.startswith("day-"):
-            return event_id.removeprefix("day-")[:10]
-        value = event.get("start") or event.get("startStr")
-        if value:
-            return str(value)[:10]
+        event_click = state.get("eventClick")
+        if isinstance(event_click, dict):
+            event = event_click.get("event") if isinstance(event_click.get("event"), dict) else event_click
+            event_id = str(event.get("id", ""))
+            if event_id.startswith("day-"):
+                return event_id.removeprefix("day-")[:10]
+            value = event.get("start") or event.get("startStr")
+            if value:
+                return _calendar_state_date(value)
 
     dates_set = state.get("datesSet")
     if current_view == "日视图" and isinstance(dates_set, dict):
         value = dates_set.get("startStr") or dates_set.get("start")
         if value:
-            return str(value)[:10]
+            return _calendar_state_date(value)
 
     return None
 
@@ -1841,7 +2044,7 @@ def _render_streamlit_calendar(
 
 
 def _render_calendar_tab(admin: dict[str, Any]) -> None:
-    st.subheader("领取时间管理")
+    st.subheader("时间管理")
     activities = list_published_activities()
     if not activities:
         st.warning("暂无已发布活动。")
@@ -1918,13 +2121,218 @@ def _render_schedule_tab(admin: dict[str, Any]) -> None:
 
 
 def _render_reservation_management_tab(admin: dict[str, Any]) -> None:
-    section = _current_publish_section()
-    section = _render_publish_subnav(section)
-
-    if section == "building":
-        _render_building_tab(admin)
-    else:
+    schedule_tab, building_tab = st.tabs(["时间管理", "楼宇管理"])
+    with schedule_tab:
         _render_schedule_tab(admin)
+    with building_tab:
+        _render_building_tab(admin)
+
+
+def _render_after_sale_table(rows: list[dict[str, Any]]) -> None:
+    table = [
+        {
+            "售后单": _format_after_sale_id(row["id"]),
+            "员工": f"{row['employee_name']}（{row['employee_no']}）",
+            "部门": row["department"],
+            "活动": row["activity_name"],
+            "礼物": row["gift_name"],
+            "楼宇": row["building"],
+            "类型": _after_sale_issue_label(row["issue_type"]),
+            "期望处理": _after_sale_resolution_label(row["expected_resolution"]),
+            "状态": _after_sale_status_label(row["status"]),
+            "提交时间": row["created_at"],
+        }
+        for row in rows
+    ]
+    st.dataframe(table, use_container_width=True, hide_index=True)
+
+
+def _request_after_sale_admin_dialog(after_sale_id: int) -> None:
+    st.session_state["admin_after_sale_dialog_id"] = int(after_sale_id)
+
+
+def _close_after_sale_admin_dialog() -> None:
+    st.session_state.pop("admin_after_sale_dialog_id", None)
+
+
+def _render_after_sale_rows(rows: list[dict[str, Any]], action_label: str) -> None:
+    if not rows:
+        st.caption("暂无售后单。")
+        return
+
+    header_cols = st.columns([1, 1.1, 1, 1.4, 1.3, 0.9, 1, 0.7])
+    headers = ["售后单", "员工", "部门", "活动", "礼物", "状态", "提交时间", ""]
+    for col, header in zip(header_cols, headers):
+        col.caption(header)
+
+    for row in rows:
+        cols = st.columns([1, 1.1, 1, 1.4, 1.3, 0.9, 1, 0.7])
+        cols[0].write(_format_after_sale_id(row["id"]))
+        cols[1].write(f"{row['employee_name']}（{row['employee_no']}）")
+        cols[2].write(row["department"])
+        cols[3].write(row["activity_name"])
+        cols[4].write(row["gift_name"])
+        cols[5].write(_after_sale_status_label(row["status"]))
+        cols[6].write(row["created_at"])
+        if cols[7].button(
+            action_label,
+            key=f"open_after_sale_{action_label}_{row['id']}",
+            use_container_width=True,
+        ):
+            _request_after_sale_admin_dialog(row["id"])
+            st.rerun()
+
+
+def _render_after_sale_detail(after_sale: dict[str, Any], admin: dict[str, Any]) -> None:
+    st.markdown(f"**{_format_after_sale_id(after_sale['id'])} 详情**")
+    detail_cols = st.columns(3)
+    detail_cols[0].write(f"员工：{after_sale['employee_name']}（{after_sale['employee_no']}）")
+    detail_cols[0].write(f"部门：{after_sale['department']}")
+    detail_cols[1].write(f"活动：{after_sale['activity_name']}")
+    detail_cols[1].write(f"礼物：{after_sale['gift_name']}")
+    detail_cols[2].write(f"楼宇：{after_sale['building']}")
+    detail_cols[2].write(
+        f"原时间：{after_sale['slot_date']} {after_sale['start_time']}-{after_sale['end_time']}"
+    )
+    st.write(f"问题类型：{_after_sale_issue_label(after_sale['issue_type'])}")
+    st.write(f"期望处理：{_after_sale_resolution_label(after_sale['expected_resolution'])}")
+    st.write(f"问题描述：{after_sale['description']}")
+    st.write(f"联系方式：{after_sale['contact_phone']}")
+    st.caption(
+        f"当前库存：可用 {after_sale['available_stock']}，已发放 {after_sale['redeemed_stock']}；"
+        f"验证码 {after_sale['claim_code']}"
+    )
+    if after_sale.get("admin_note"):
+        st.info(f"当前备注：{after_sale['admin_note']}")
+
+    if after_sale["status"] not in {"pending", "processing"}:
+        st.caption("该售后单已结束。")
+        if st.button("关闭", key=f"after_sale_close_{after_sale['id']}"):
+            _close_after_sale_admin_dialog()
+            st.rerun()
+        return
+
+    admin_note = st.text_area(
+        "处理备注",
+        value=after_sale.get("admin_note", ""),
+        height=88,
+        key=f"after_sale_admin_note_{after_sale['id']}",
+    )
+    inventory_action = st.selectbox(
+        "完成售后的库存动作",
+        list(AFTER_SALE_INVENTORY_ACTIONS.keys()),
+        format_func=_after_sale_inventory_action_label,
+        key=f"after_sale_inventory_action_{after_sale['id']}",
+    )
+
+    cols = st.columns(3)
+    with cols[0]:
+        if st.button(
+            "标记处理中",
+            disabled=after_sale["status"] != "pending",
+            use_container_width=True,
+            key=f"after_sale_processing_{after_sale['id']}",
+        ):
+            try:
+                mark_after_sale_processing(after_sale["id"], admin_note, admin_id=admin["id"])
+                st.success("售后单已标记处理中")
+                _close_after_sale_admin_dialog()
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+    with cols[1]:
+        if st.button(
+            "完成售后",
+            type="primary",
+            use_container_width=True,
+            key=f"after_sale_resolve_{after_sale['id']}",
+        ):
+            try:
+                resolve_after_sale(
+                    after_sale["id"],
+                    inventory_action,
+                    admin_note,
+                    admin_id=admin["id"],
+                )
+                st.success("售后单已完成")
+                _close_after_sale_admin_dialog()
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+    with cols[2]:
+        if st.button(
+            "拒绝售后",
+            use_container_width=True,
+            key=f"after_sale_reject_{after_sale['id']}",
+        ):
+            try:
+                reject_after_sale(after_sale["id"], admin_note, admin_id=admin["id"])
+                st.success("售后单已拒绝")
+                _close_after_sale_admin_dialog()
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+    if st.button("关闭", key=f"after_sale_close_active_{after_sale['id']}"):
+        _close_after_sale_admin_dialog()
+        st.rerun()
+
+
+def _render_after_sale_admin_dialog(admin: dict[str, Any]) -> None:
+    after_sale_id = st.session_state.get("admin_after_sale_dialog_id")
+    if not after_sale_id:
+        return
+
+    after_sale = get_after_sale(int(after_sale_id))
+    if not after_sale:
+        _close_after_sale_admin_dialog()
+        st.warning("售后单不存在或已被删除。")
+        return
+
+    def dialog_body() -> None:
+        _render_after_sale_detail(after_sale, admin)
+
+    dialog = getattr(st, "dialog", None)
+    if dialog:
+        dialog("处理售后")(dialog_body)()
+    else:
+        with st.container(border=True):
+            dialog_body()
+
+
+def _render_after_sale_tab(admin: dict[str, Any]) -> None:
+    st.subheader("售后处理")
+    _render_after_sale_admin_dialog(admin)
+    activities = list_admin_activities()
+    activity_options = [{"id": None, "name": "全部活动", "status": "all"}] + activities
+    filter_cols = st.columns([1.2, 1.4])
+    with filter_cols[0]:
+        selected_activity = st.selectbox(
+            "活动",
+            activity_options,
+            format_func=lambda item: (
+                "全部活动"
+                if item["id"] is None
+                else f"{item['name']}（{_activity_status_label(item.get('status', 'published'))}）"
+            ),
+            key="after_sale_activity_filter",
+        )
+    with filter_cols[1]:
+        keyword = st.text_input("搜索", placeholder="员工、工号、礼物或验证码", key="after_sale_keyword")
+
+    rows = list_after_sales_for_admin(
+        activity_id=selected_activity["id"],
+        status="all",
+        keyword=keyword,
+    )
+    active_rows = [row for row in rows if row["status"] in {"pending", "processing"}]
+    history_rows = [row for row in rows if row["status"] not in {"pending", "processing"}]
+
+    pending_tab, history_tab = st.tabs(["待处理", "历史售后"])
+    with pending_tab:
+        _render_after_sale_rows(active_rows, "处理")
+    with history_tab:
+        _render_after_sale_rows(history_rows, "查看")
 
 
 def _render_dashboard_tab() -> None:
@@ -1989,10 +2397,373 @@ def _render_dashboard_tab() -> None:
     st.dataframe(gift_table, use_container_width=True, hide_index=True)
 
 
+def _format_test_employee(employee: dict[str, Any]) -> str:
+    return f"{employee['name']} / {employee['employee_no']} / {employee['department']}"
+
+
+def _format_test_activity(activity: dict[str, Any]) -> str:
+    return f"{activity['name']}（{activity['start_date']} 至 {activity['end_date']}）"
+
+
+def _format_test_gift(gift: dict[str, Any]) -> str:
+    available = gift.get("available_stock", 0)
+    category = gift.get("category") or "未分类"
+    return f"{gift['name']} · {category} · 可用 {available}"
+
+
+def _format_test_slot(slot: dict[str, Any]) -> str:
+    return (
+        f"{slot['slot_date']} {slot['start_time']}-{slot['end_time']} "
+        f"剩余 {slot['remaining']}/{slot['capacity']}"
+    )
+
+
+def _render_test_result_table(results: list[dict[str, Any]]) -> None:
+    if not results:
+        return
+    st.markdown("**最近一次测试结果**")
+    st.dataframe(results, use_container_width=True, hide_index=True)
+
+
+def _reservation_test_gift_options(activity_id: int, building_name: str) -> list[dict[str, Any]]:
+    gift_options: dict[int, dict[str, Any]] = {}
+    for row in list_inventory_rows(activity_id):
+        if row["building"] != building_name:
+            continue
+        gift_options[int(row["gift_id"])] = {
+            "id": int(row["gift_id"]),
+            "name": row["gift_name"],
+            "category": row.get("category", ""),
+            "available_stock": int(row.get("available_stock", 0)),
+        }
+    return sorted(gift_options.values(), key=lambda item: item["name"])
+
+
+def _claim_result_row(
+    employee: dict[str, Any],
+    gift_name: str,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    claim = result.get("claim") or {}
+    return {
+        "员工": employee["name"],
+        "工号": employee["employee_no"],
+        "部门": employee["department"],
+        "礼物": gift_name,
+        "结果": "成功" if result.get("ok") else "失败",
+        "说明": result.get("message", ""),
+        "验证码": claim.get("claim_code", ""),
+    }
+
+
+def _render_single_reservation_test() -> None:
+    employees = list_employees()
+    if not employees:
+        st.warning("暂无员工数据。")
+        return
+
+    employee = st.selectbox(
+        "测试员工",
+        employees,
+        format_func=_format_test_employee,
+        key="reservation_test_single_employee",
+    )
+    activities = list_employee_available_activities(employee["id"])
+    if not activities:
+        st.warning("该员工暂无可预约活动。")
+        return
+
+    activity = st.selectbox(
+        "活动",
+        activities,
+        format_func=_format_test_activity,
+        key="reservation_test_single_activity",
+    )
+    buildings = list_activity_buildings(activity["id"])
+    if not buildings:
+        st.warning("该活动暂无可领取楼宇。")
+        return
+
+    building = st.selectbox(
+        "楼宇",
+        buildings,
+        format_func=lambda item: item["name"],
+        key="reservation_test_single_building",
+    )
+    gifts = [
+        gift
+        for gift in list_eligible_gifts(employee["id"], activity["id"], building=building["name"])
+        if int(gift.get("available_stock", 0)) > 0
+    ]
+    if not gifts:
+        st.warning("该员工在当前楼宇暂无可领且有库存的礼物。")
+        return
+
+    gift = st.selectbox(
+        "礼物",
+        gifts,
+        format_func=_format_test_gift,
+        key="reservation_test_single_gift",
+    )
+    slots = [
+        slot
+        for slot in list_time_slots(activity["id"], building["name"])
+        if int(slot.get("remaining", 0)) > 0
+    ]
+    if not slots:
+        st.warning("该楼宇暂无可预约时间段。")
+        return
+
+    slot = st.selectbox(
+        "领取时间段",
+        slots,
+        format_func=_format_test_slot,
+        key="reservation_test_single_slot",
+    )
+
+    if st.button("模拟该员工预约", type="primary", use_container_width=True):
+        result = create_claim(
+            employee_id=employee["id"],
+            activity_id=activity["id"],
+            gift_id=gift["id"],
+            building=building["name"],
+            time_slot_id=slot["id"],
+        )
+        st.session_state["reservation_test_results"] = [
+            _claim_result_row(employee, gift["name"], result)
+        ]
+        if result["ok"]:
+            st.success(result["message"])
+        else:
+            st.error(result["message"])
+
+    claims = list_employee_claims(employee["id"])
+    if claims:
+        st.markdown("**该员工已有领取记录**")
+        st.dataframe(
+            [
+                {
+                    "活动": claim["activity_name"],
+                    "礼物": claim["gift_name"],
+                    "楼宇": claim["building"],
+                    "时间": f"{claim['slot_date']} {_slot_time_label(claim)}",
+                    "状态": CLAIM_STATUS_LABELS.get(claim["status"], claim["status"]),
+                    "验证码": claim["claim_code"],
+                }
+                for claim in claims
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+def _render_batch_reservation_test() -> None:
+    activities = list_published_activities()
+    if not activities:
+        st.warning("暂无已上线活动。")
+        return
+
+    activity = st.selectbox(
+        "活动",
+        activities,
+        format_func=_format_test_activity,
+        key="reservation_test_batch_activity",
+    )
+    buildings = list_activity_buildings(activity["id"])
+    if not buildings:
+        st.warning("该活动暂无可领取楼宇。")
+        return
+
+    building = st.selectbox(
+        "楼宇",
+        buildings,
+        format_func=lambda item: item["name"],
+        key="reservation_test_batch_building",
+    )
+    slots = [
+        slot
+        for slot in list_time_slots(activity["id"], building["name"])
+        if int(slot.get("remaining", 0)) > 0
+    ]
+    if not slots:
+        st.warning("该楼宇暂无可预约时间段。")
+        return
+
+    slot = st.selectbox(
+        "领取时间段",
+        slots,
+        format_func=_format_test_slot,
+        key="reservation_test_batch_slot",
+    )
+
+    employees = list_employees()
+    employee_by_id = {int(employee["id"]): employee for employee in employees}
+    selected_employee_ids = st.multiselect(
+        "测试员工",
+        list(employee_by_id.keys()),
+        format_func=lambda employee_id: _format_test_employee(employee_by_id[int(employee_id)]),
+        key="reservation_test_batch_employees",
+    )
+
+    gift_strategy = st.radio(
+        "礼物策略",
+        ["自动选择每人第一个可领礼物", "指定同一礼物"],
+        horizontal=True,
+        key="reservation_test_batch_gift_strategy",
+    )
+    selected_gift: dict[str, Any] | None = None
+    if gift_strategy == "指定同一礼物":
+        gift_options = _reservation_test_gift_options(activity["id"], building["name"])
+        if not gift_options:
+            st.warning("该楼宇暂无礼物库存。")
+            return
+        selected_gift = st.selectbox(
+            "指定礼物",
+            gift_options,
+            format_func=_format_test_gift,
+            key="reservation_test_batch_gift",
+        )
+
+    if st.button("批量模拟预约", type="primary", use_container_width=True):
+        if not selected_employee_ids:
+            st.warning("请至少选择一个测试员工。")
+            return
+
+        results = []
+        for employee_id in selected_employee_ids:
+            employee = employee_by_id[int(employee_id)]
+            if gift_strategy == "自动选择每人第一个可领礼物":
+                gifts = [
+                    gift
+                    for gift in list_eligible_gifts(
+                        employee["id"],
+                        activity["id"],
+                        building=building["name"],
+                    )
+                    if int(gift.get("available_stock", 0)) > 0
+                ]
+                if not gifts:
+                    results.append(
+                        {
+                            "员工": employee["name"],
+                            "工号": employee["employee_no"],
+                            "部门": employee["department"],
+                            "礼物": "",
+                            "结果": "失败",
+                            "说明": "该员工无可领礼物或当前楼宇库存不足",
+                            "验证码": "",
+                        }
+                    )
+                    continue
+                gift = gifts[0]
+            else:
+                gift = selected_gift
+
+            if not gift:
+                results.append(
+                    {
+                        "员工": employee["name"],
+                        "工号": employee["employee_no"],
+                        "部门": employee["department"],
+                        "礼物": "",
+                        "结果": "失败",
+                        "说明": "未选择礼物",
+                        "验证码": "",
+                    }
+                )
+                continue
+
+            result = create_claim(
+                employee_id=employee["id"],
+                activity_id=activity["id"],
+                gift_id=gift["id"],
+                building=building["name"],
+                time_slot_id=slot["id"],
+            )
+            results.append(_claim_result_row(employee, gift["name"], result))
+
+        st.session_state["reservation_test_results"] = results
+        success_count = sum(1 for row in results if row["结果"] == "成功")
+        st.success(f"批量预约完成：成功 {success_count}，失败 {len(results) - success_count}")
+
+    claims = list_claims_for_admin(activity["id"])
+    if claims:
+        st.markdown("**当前活动预约概览**")
+        st.dataframe(
+            [
+                {
+                    "员工": claim["employee_name"],
+                    "部门": claim["department"],
+                    "礼物": claim["gift_name"],
+                    "楼宇": claim["building"],
+                    "时间": f"{claim['slot_date']} {_slot_time_label(claim)}",
+                    "状态": CLAIM_STATUS_LABELS.get(claim["status"], claim["status"]),
+                    "验证码": claim["claim_code"],
+                }
+                for claim in claims[:80]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+def _render_reservation_test_tool(admin: dict[str, Any]) -> None:
+    st.subheader("隐藏测试工具：员工预约")
+    st.warning("该页面用于功能级测试，会真实创建预约记录、占用库存并生成员工通知。")
+    st.caption("访问方式：`?portal=admin&tool=reservation_test`。该入口不会出现在正式管理菜单中。")
+
+    mode = st.radio(
+        "测试模式",
+        ["单人模拟预约", "批量模拟预约"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="reservation_test_mode",
+    )
+    if mode == "单人模拟预约":
+        _render_single_reservation_test()
+    else:
+        _render_batch_reservation_test()
+
+    _render_test_result_table(st.session_state.get("reservation_test_results", []))
+
+
+def _render_hidden_tool_sidebar() -> None:
+    st.sidebar.markdown(
+        """
+        <div class="portal-nav-title">隐藏测试工具</div>
+        <div class="portal-nav">
+            <a class="portal-nav-item active" href="?portal=admin&tool=reservation_test" target="_self">员工预约测试</a>
+            <a class="portal-nav-item" href="?portal=admin" target="_self">返回管理后台</a>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.sidebar.markdown('<div class="admin-sidebar-spacer"></div>', unsafe_allow_html=True)
+    if st.sidebar.button("重新初始化演示数据"):
+        seed_demo_data(force=True)
+        st.session_state.pop("config_draft", None)
+        st.session_state.pop("reservation_test_results", None)
+        st.success("演示数据已重置")
+        st.rerun()
+    if st.sidebar.button("退出管理后台"):
+        st.session_state.pop("admin", None)
+        st.session_state.pop("admin_page", None)
+        st.session_state.pop("admin_nav_radio", None)
+        st.session_state.pop("reservation_test_results", None)
+        st.rerun()
+
+
 def render() -> None:
     st.header("管理后台")
     admin = _ensure_admin()
     if not admin:
+        return
+
+    _render_compact_action_styles()
+
+    if _current_admin_tool() == "reservation_test":
+        _render_hidden_tool_sidebar()
+        _render_reservation_test_tool(admin)
         return
 
     page = _current_admin_page()
@@ -2008,9 +2779,7 @@ def render() -> None:
         if st.button("退出管理后台"):
             st.session_state.pop("admin", None)
             st.session_state.pop("admin_page", None)
-            st.session_state.pop("publish_section", None)
             st.session_state.pop("admin_nav_radio", None)
-            st.session_state.pop("publish_section_radio", None)
             st.rerun()
 
     if page == "config":
@@ -2019,5 +2788,7 @@ def render() -> None:
         _render_reservation_management_tab(admin)
     elif page == "redeem":
         _render_redeem_tab(admin)
+    elif page == "after_sale":
+        _render_after_sale_tab(admin)
     else:
         _render_dashboard_tab()

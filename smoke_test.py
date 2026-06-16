@@ -1,4 +1,11 @@
 from seed_data import seed_demo_data
+from services.after_sale_service import (
+    create_after_sale,
+    list_after_sales_for_admin,
+    list_after_sales_for_employee,
+    mark_after_sale_processing,
+    resolve_after_sale,
+)
 from services.activity_service import (
     add_building,
     add_gift_to_activity,
@@ -175,6 +182,68 @@ def main() -> None:
             item["type"] == "claim_redeemed" and item["claim_id"] == second["claim"]["id"]
             for item in list_notifications(tech["id"])
         )
+
+        before_after_sale_inventory = _pick(
+            list_inventory_for_gift(activity["id"], gift["id"]),
+            lambda item: item["id"] == updated_claim["inventory_id"],
+            "缺少售后测试库存",
+        )
+        after_sale = create_after_sale(
+            claim_id=updated_claim["id"],
+            employee_id=tech["id"],
+            issue_type="damaged",
+            expected_resolution="exchange",
+            description="键帽破损，需要更换",
+            contact_phone=tech["phone"],
+        )
+        assert after_sale["status"] == "pending"
+        assert any(
+            item["type"] == "after_sale_submitted" and item["claim_id"] == updated_claim["id"]
+            for item in list_notifications(tech["id"])
+        )
+        assert any(item["id"] == after_sale["id"] for item in list_after_sales_for_employee(tech["id"]))
+        mark_after_sale_processing(after_sale["id"], "已联系仓库准备换货", admin_id=1)
+        resolved_after_sale = resolve_after_sale(
+            after_sale["id"],
+            inventory_action="exchange_scrap",
+            admin_note="退回报废并重新发放",
+            admin_id=1,
+        )
+        assert resolved_after_sale["status"] == "resolved"
+        assert any(
+            item["type"] == "after_sale_resolved" and item["claim_id"] == updated_claim["id"]
+            for item in list_notifications(tech["id"])
+        )
+        assert any(
+            item["id"] == after_sale["id"]
+            for item in list_after_sales_for_admin(status="resolved")
+        )
+        after_after_sale_inventory = _pick(
+            list_inventory_for_gift(activity["id"], gift["id"]),
+            lambda item: item["id"] == updated_claim["inventory_id"],
+            "缺少售后后库存",
+        )
+        assert (
+            after_after_sale_inventory["available_stock"]
+            == before_after_sale_inventory["available_stock"] - 1
+        )
+        assert (
+            after_after_sale_inventory["redeemed_stock"]
+            == before_after_sale_inventory["redeemed_stock"] + 1
+        )
+        try:
+            create_after_sale(
+                claim_id=updated_claim["id"],
+                employee_id=tech["id"],
+                issue_type="damaged",
+                expected_resolution="exchange",
+                description="重复提交",
+                contact_phone=tech["phone"],
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("不应允许同一领取记录重复提交售后")
 
         repeated = redeem_claim_by_code(second["claim"]["claim_code"], admin_id=1)
         assert not repeated["ok"]

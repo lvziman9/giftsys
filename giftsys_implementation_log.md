@@ -327,6 +327,13 @@ giftsys/
 | 2026-06-08 | 修改 | `services/activity_service.py`, `views/admin_portal.py`, `smoke_test.py`, `giftsys_prd.md` | 活动管理增加“礼物与库存管理”，支持新增礼物以及对已有礼物补充库存或减少可用库存；库存调整同步礼物总库存、库存流水和操作日志，并阻止减少超过可用库存的数量。 |
 | 2026-06-08 | 修改 | `services/activity_service.py`, `views/admin_portal.py`, `smoke_test.py`, `README.md`, `giftsys_prd.md`, `giftsys_implementation_log.md` | 去除固定工期表述；“联系改期”改为弹窗选择目标日期和时间段，模拟发送固定短信到员工手机号并记录操作日志。 |
 | 2026-06-08 | 新增 | `services/notification_service.py`, `database.py`, `services/activity_service.py`, `services/claim_service.py`, `views/employee_portal.py`, `views/admin_portal.py`, `smoke_test.py`, `giftsys_prd.md` | 员工端改为工号和手机号后四位登录；新增通知中心和 `notifications` 表；活动上线、预约成功、取消、过期、核销成功生成员工通知；管理员联系改期后生成员工端可操作通知，员工可同意或不同意改期。 |
+| 2026-06-16 | 修改 | `seed_data.py`, `README.md` | 将演示员工扩展到 10 人，并在 README 中以表格列出工号、姓名、部门、手机号后四位和默认可见礼物，方便员工端登录和资格过滤测试。 |
+| 2026-06-16 | 新增 | `services/after_sale_service.py`, `database.py`, `views/employee_portal.py`, `views/admin_portal.py`, `smoke_test.py`, `README.md`, `giftsys_prd.md` | 新增售后模块：员工端 tabs 切换、已核销记录申请售后、我的售后记录；管理端新增“售后处理”；完成售后时支持补发、退回、换货、报废等库存动作并写入库存流水和员工通知。 |
+| 2026-06-16 | 新增 | `views/admin_portal.py`, `README.md`, `giftsys_prd.md` | 新增隐藏功能级测试入口 `?portal=admin&tool=reservation_test`，支持单人和批量模拟员工预约，并真实写入预约、占用库存和生成员工通知，方便测试核销、改期、售后和看板。 |
+| 2026-06-16 | 修改 | `views/admin_portal.py`, `views/employee_portal.py`, `giftsys_prd.md` | 售后处理改为“待处理 / 历史售后” tabs，每条记录右侧按钮打开弹窗处理；员工端功能切换和预约管理切换改用 tabs；员工端售后申请按钮改为主题色小按钮；预约管理命名统一为“时间管理 / 楼宇管理”。 |
+| 2026-06-16 | 修改 | `views/admin_portal.py`, `views/employee_portal.py`, `giftsys_prd.md` | 修复日视图点击空白时段导致日期按 UTC 截断而错到前一天的问题；活动发布页改为“活动配置 / 活动管理” tabs；配置活动增加独立标题；时间管理拆为时间段管理和容量管理；下线活动、删除时间段和保存容量按钮调整为小尺寸样式；员工端售后按钮调整到卡片右侧。 |
+| 2026-06-16 | 修改 | `views/admin_portal.py`, `giftsys_prd.md` | 时间段管理中的“新增时间段”和“删除时间段”改为弹窗操作，页面内仅保留并列小按钮；删除弹窗继续限制已有预约的时间段不可删除。 |
+| 2026-06-16 | 修改 | `views/admin_portal.py` | 优化时间段管理弹窗：弹窗居中展示；新增时间段弹窗改为大尺寸并使用两列布局，避免日期、时段和楼宇下拉框内容被截断。 |
 
 ## 8. 当前状态
 

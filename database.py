@@ -231,6 +231,40 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_notifications_employee
             ON notifications (employee_id, is_read, id);
+
+            CREATE TABLE IF NOT EXISTS after_sales (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                claim_id INTEGER NOT NULL,
+                employee_id INTEGER NOT NULL,
+                activity_id INTEGER NOT NULL,
+                gift_id INTEGER NOT NULL,
+                inventory_id INTEGER NOT NULL,
+                issue_type TEXT NOT NULL,
+                expected_resolution TEXT NOT NULL,
+                description TEXT NOT NULL,
+                contact_phone TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('pending', 'processing', 'resolved', 'rejected', 'cancelled')
+                ) DEFAULT 'pending',
+                inventory_action TEXT NOT NULL DEFAULT 'none',
+                admin_note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                resolved_at TEXT,
+                cancelled_at TEXT,
+                rejected_at TEXT,
+                FOREIGN KEY (claim_id) REFERENCES claims(id) ON DELETE CASCADE,
+                FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+                FOREIGN KEY (activity_id) REFERENCES activities(id) ON DELETE CASCADE,
+                FOREIGN KEY (gift_id) REFERENCES gifts(id) ON DELETE CASCADE,
+                FOREIGN KEY (inventory_id) REFERENCES inventory(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_after_sales_employee
+            ON after_sales (employee_id, status, id);
+
+            CREATE INDEX IF NOT EXISTS idx_after_sales_status
+            ON after_sales (status, id);
             """
         )
         _ensure_column(conn, "time_slots", "is_available", "INTEGER NOT NULL DEFAULT 1")
